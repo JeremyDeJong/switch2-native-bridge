@@ -15,22 +15,28 @@ namespace Switch2Bridge;
 /// </summary>
 sealed class App : Application
 {
-    static readonly string SettingsPath = Path.Combine(Log.Directory, "settings.json");
-
     readonly CancellationTokenSource _cts = new();
+    readonly bool _justUpdated;
     Forms.NotifyIcon? _tray;
     System.Drawing.Icon? _idleIcon, _liveIcon;
     StatusWindow? _window;
     HMContext? _ctx;
     Bridge? _bridge;
     bool _autostart;
+    bool _quitting;
+    DispatcherTimer? _updateTimer;
 
     public Bridge? Bridge => _bridge;
     public bool AutostartEnabled => _autostart;
     public string StartupState { get; private set; } = "Starting...";
 
-    public App()
+    /// <summary>A newer release, once a check has found one.</summary>
+    public UpdateInfo? AvailableUpdate { get; private set; }
+    public event Action? UpdateChanged;
+
+    public App(bool justUpdated = false)
     {
+        _justUpdated = justUpdated;
         ThemeMode = ThemeMode.System;
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
     }
@@ -84,7 +90,7 @@ sealed class App : Application
                 _ctx.InstallDriver();
             });
 
-            bool firstRun = !File.Exists(SettingsPath);
+            bool firstRun = !Settings.Current.ExistedOnLoad;
             await Task.Run(() =>
             {
                 if (firstRun) FirstRunAutostart();
@@ -102,7 +108,21 @@ sealed class App : Application
             StartupState = "Ready";
             UpdateTrayIcon();
 
+            // Turn controllers off before the PC sleeps, so they don't drain overnight.
+            Microsoft.Win32.SystemEvents.PowerModeChanged += (_, pe) =>
+            {
+                if (pe.Mode == Microsoft.Win32.PowerModes.Suspend && Settings.Current.OffOnSleep && _bridge != null)
+                    _bridge.PowerOffAllAsync("PC going to sleep").Wait(TimeSpan.FromSeconds(4));
+            };
+
+            if (_justUpdated)
+                _tray?.ShowBalloonTip(3000, "Switch 2 Native Bridge", $"Updated to v{Updater.Current.ToString(3)}.", Forms.ToolTipIcon.Info);
             if (firstRun) ShowStatus();
+
+            _updateTimer = new DispatcherTimer { Interval = TimeSpan.FromHours(24) };
+            _updateTimer.Tick += async (_, _) => await CheckForUpdatesAsync(manual: false);
+            _updateTimer.Start();
+            await CheckForUpdatesAsync(manual: false);
         }
         catch (Exception ex)
         {
@@ -119,8 +139,8 @@ sealed class App : Application
         try
         {
             Autostart.Enable();
-            Directory.CreateDirectory(Log.Directory);
-            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(new { autostartConfigured = true }));
+            Settings.Current.AutostartConfigured = true;
+            Settings.Save();
         }
         catch (Exception e)
         {
@@ -146,6 +166,61 @@ sealed class App : Application
             MessageBox.Show(e.Message, "Switch 2 Native Bridge", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         _autostart = await Task.Run(SafeIsAutostartEnabled);
+    }
+
+    /// <summary>Looks for a newer release. Automatic checks respect the setting and a skipped
+    /// version and only notify; a manual check always runs and reports "up to date" too.</summary>
+    public async Task CheckForUpdatesAsync(bool manual)
+    {
+        if (!manual && !Settings.Current.CheckForUpdates) return;
+        try
+        {
+            var update = await Updater.CheckAsync(_cts.Token);
+            AvailableUpdate = update;
+            UpdateChanged?.Invoke();
+            if (update == null)
+            {
+                if (manual) _tray?.ShowBalloonTip(2000, "Switch 2 Native Bridge", $"You're on the latest version (v{Updater.Current.ToString(3)}).", Forms.ToolTipIcon.None);
+                return;
+            }
+            Log.Info($"Update available: {update.Tag}.");
+            if (manual || Settings.Current.SkippedVersion != update.Version.ToString(3))
+                _tray?.ShowBalloonTip(4000, "Switch 2 Native Bridge",
+                    $"Version {update.Version.ToString(3)} is available. Open the bridge to update.", Forms.ToolTipIcon.Info);
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            Log.Warn($"Update check failed: {e.Message}");
+            if (manual) MessageBox.Show($"Couldn't check for updates:\n\n{e.Message}", "Switch 2 Native Bridge",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    public void SkipUpdate()
+    {
+        if (AvailableUpdate == null) return;
+        Settings.Current.SkippedVersion = AvailableUpdate.Version.ToString(3);
+        Settings.Save();
+        UpdateChanged?.Invoke();
+    }
+
+    /// <summary>Downloads, verifies and starts the update, then exits. Controllers stay on:
+    /// the new version picks them up within seconds.</summary>
+    public async Task InstallUpdateAsync(IProgress<string> progress)
+    {
+        if (AvailableUpdate is not { } update) return;
+        try
+        {
+            await Updater.InstallAsync(update, progress, _cts.Token);
+            await QuitAsync(powerOff: false);
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            Log.Error($"Update failed: {e.Message}");
+            progress.Report("");
+            MessageBox.Show($"The update didn't install:\n\n{e.Message}", "Switch 2 Native Bridge",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     public void ShowStatus()
@@ -190,10 +265,22 @@ sealed class App : Application
         autostart.Click += async (_, _) => await SetAutostartAsync(autostart.IsChecked);
         var log = new MenuItem { Header = "Open log" };
         log.Click += (_, _) => OpenLog();
+        var update = AvailableUpdate is { } u
+            ? new MenuItem { Header = $"Update to v{u.Version.ToString(3)}..." }
+            : new MenuItem { Header = "Check for updates" };
+        update.Click += async (_, _) =>
+        {
+            if (AvailableUpdate != null) ShowStatus();
+            else await CheckForUpdatesAsync(manual: true);
+        };
+        var turnOff = new MenuItem { Header = "Turn off controllers", IsEnabled = _bridge?.AnyLive == true };
+        turnOff.Click += async (_, _) => { if (_bridge != null) await _bridge.PowerOffAllAsync("turned off from the tray"); };
         var quit = new MenuItem { Header = "Quit" };
-        quit.Click += (_, _) => Quit();
+        quit.Click += async (_, _) => await QuitAsync(powerOff: Settings.Current.OffOnQuit);
         menu.Items.Add(open);
+        menu.Items.Add(turnOff);
         menu.Items.Add(autostart);
+        menu.Items.Add(update);
         menu.Items.Add(log);
         menu.Items.Add(new Separator());
         menu.Items.Add(quit);
@@ -221,9 +308,17 @@ sealed class App : Application
         _tray.Text = live ? "Switch 2 Native Bridge: connected" : "Switch 2 Native Bridge: waiting for controller";
     }
 
-    public void Quit()
+    public void Quit() => _ = QuitAsync(powerOff: false);
+
+    /// <summary>Exits, first turning controllers off when asked (the quit setting), so they
+    /// don't stay awake looking for the PC.</summary>
+    public async Task QuitAsync(bool powerOff)
     {
+        if (_quitting) return;
+        _quitting = true;
         Log.Info("Shutting down.");
+        _updateTimer?.Stop();
+        if (powerOff && _bridge != null) await _bridge.PowerOffAllAsync("bridge closing");
         _cts.Cancel();
         _window?.Close();
         if (_tray != null) _tray.Visible = false;

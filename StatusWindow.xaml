@@ -3,22 +3,45 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Switch 2 Native Bridge"
         Icon="pack://application:,,,/assets/app.ico"
-        Width="600" Height="540" MinWidth="460" MinHeight="380"
+        Width="620" Height="680" MinWidth="480" MinHeight="420"
         WindowStartupLocation="CenterScreen">
     <Grid Margin="24,12,24,20">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <StackPanel Grid.Row="0" Margin="0,0,0,16">
+        <StackPanel Grid.Row="0" Margin="0,0,0,12">
             <TextBlock Text="Controllers" FontSize="28" FontWeight="SemiBold" />
             <TextBlock x:Name="Summary" Margin="0,4,0,0" TextWrapping="Wrap"
                        Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
         </StackPanel>
 
-        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+        <!-- Update available -->
+        <Border x:Name="UpdateBanner" Grid.Row="1" Visibility="Collapsed" CornerRadius="8" Padding="16,12" Margin="0,0,0,12"
+                BorderThickness="1" Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{DynamicResource AccentFillColorDefaultBrush}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock x:Name="UpdateTitle" FontWeight="SemiBold" />
+                    <TextBlock x:Name="UpdateStatus" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               Text="Your controllers stay connected while it updates." />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="ReleaseNotesButton" Content="What's new" Margin="0,0,8,0" Click="OnReleaseNotes" />
+                    <Button x:Name="SkipButton" Content="Skip" Margin="0,0,8,0" Click="OnSkipUpdate" />
+                    <Button x:Name="UpdateButton" Content="Update now" Click="OnUpdate" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
             <StackPanel>
                 <ItemsControl x:Name="Pads" Focusable="False">
                     <ItemsControl.ItemTemplate>
@@ -34,7 +57,7 @@
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
 
-                                    <Border Width="40" Height="40" CornerRadius="6" VerticalAlignment="Center"
+                                    <Border Width="40" Height="40" CornerRadius="6" VerticalAlignment="Top"
                                             Background="{DynamicResource SubtleFillColorSecondaryBrush}"
                                             ToolTip="Player number">
                                         <TextBlock Text="{Binding Number}" FontSize="18" FontWeight="SemiBold"
@@ -45,6 +68,12 @@
                                         <TextBlock Text="{Binding Title}" FontSize="15" FontWeight="SemiBold" />
                                         <TextBlock Text="{Binding Detail}" Margin="0,2,0,0" TextWrapping="Wrap"
                                                    Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                        <TextBlock Text="{Binding LinkDetail}" Margin="0,2,0,0" TextWrapping="Wrap"
+                                                   Visibility="{Binding ActionsVisibility}"
+                                                   ToolTip="Gaps between Bluetooth updates. A stall is a gap of 50 ms or more, which you can feel as a hitch."
+                                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                        <Button Content="Test rumble" Margin="0,8,0,0" HorizontalAlignment="Left"
+                                                Visibility="{Binding ActionsVisibility}" Tag="{Binding Number}" Click="OnTestRumble" />
                                     </StackPanel>
 
                                     <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center"
@@ -83,10 +112,44 @@
                            Text="Press any button on a controller you've paired before. For a new controller, hold its Sync button until the lights sweep." />
                 <TextBlock Margin="0,4,0,0" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
                            Text="Each Pro Controller gets its own player. A left and right Joy-Con join into one controller." />
+
+                <Expander x:Name="SettingsExpander" Header="Settings" Margin="0,16,0,0" HorizontalAlignment="Stretch">
+                    <StackPanel Margin="0,8,0,4">
+                        <TextBlock Text="Rumble strength" FontWeight="SemiBold" />
+                        <Grid Margin="0,4,0,12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="56" />
+                            </Grid.ColumnDefinitions>
+                            <Slider x:Name="RumbleSlider" Minimum="0" Maximum="100" TickFrequency="10" IsSnapToTickEnabled="False"
+                                    SmallChange="5" LargeChange="10" VerticalAlignment="Center"
+                                    AutomationProperties.Name="Rumble strength" ValueChanged="OnRumbleChanged" />
+                            <TextBlock x:Name="RumbleValue" Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right" />
+                        </Grid>
+
+                        <TextBlock Text="Turn controllers off" FontWeight="SemiBold" />
+                        <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                            <TextBlock Text="After no input for" VerticalAlignment="Center" Margin="0,0,8,0" />
+                            <ComboBox x:Name="IdleBox" MinWidth="130" SelectionChanged="OnIdleChanged"
+                                      AutomationProperties.Name="Turn controllers off after no input for" />
+                        </StackPanel>
+                        <CheckBox x:Name="SleepBox" Content="When the PC goes to sleep" Margin="0,6,0,0" Click="OnPowerOptionClick" />
+                        <CheckBox x:Name="QuitBox" Content="When the bridge quits" Margin="0,2,0,12" Click="OnPowerOptionClick" />
+
+                        <TextBlock Text="Updates" FontWeight="SemiBold" />
+                        <CheckBox x:Name="UpdatesBox" Content="Check for updates automatically" Margin="0,6,0,0" Click="OnUpdatesOptionClick" />
+                        <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                            <Button Content="Check now" Click="OnCheckUpdates" Margin="0,0,12,0" />
+                            <TextBlock x:Name="VersionText" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                        <Button Content="Open battery logs" HorizontalAlignment="Left" Margin="0,12,0,0" Click="OnOpenBatteryLogs" />
+                    </StackPanel>
+                </Expander>
             </StackPanel>
         </ScrollViewer>
 
-        <Grid Grid.Row="2" Margin="0,16,0,0">
+        <Grid Grid.Row="3" Margin="0,16,0,0">
             <CheckBox x:Name="AutostartBox" Content="Start with Windows" VerticalAlignment="Center"
                       Click="OnAutostartClick" />
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">

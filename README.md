@@ -18,6 +18,11 @@ Steam only supports the Switch 2 Pro Controller over USB. On Bluetooth, the exis
 - **Joy-Cons.** A left and a right Joy-Con are merged into one Pro Controller (left stick and buttons from the left Joy-Con, right stick, buttons and gyro from the right one). A single Joy-Con also works.
 - **Survives reconnects.** If a controller drops, its virtual controller stays in place for Steam, and pressing a button reconnects it.
 - **Tray app.** Runs from the system tray in a native Windows 11 status window that follows light/dark mode, and starts with Windows.
+- **Battery.** Shows each controller's battery voltage and level, logs it once a minute, and learns a percentage from the controller's own charge history after a couple of hours of play. Warns you when it gets low.
+- **Rumble.** A Test rumble button on each controller, and a strength slider that scales the rumble Steam sends.
+- **Bluetooth health.** Each controller shows its average and worst gap between updates and how many stalls (gaps of 50 ms or more) it had in the last minute. Long stalls are logged, and every connection ends with a summary. Useful for spotting interference or a weak adapter.
+- **Power saving.** Turns controllers off after a set time without input (15 minutes by default), when the PC goes to sleep, and when the bridge quits. Each can be changed in Settings. Press Home to wake a controller.
+- **Updates.** Checks GitHub Releases once a day. Update now downloads the new version, checks it against the release's SHA-256 file, starts it and closes the old one. Controllers reconnect within seconds.
 
 ## Requirements
 
@@ -71,6 +76,8 @@ This builds, runs the self-test, and writes `artifacts\release\Switch2Bridge-v<v
 - Battery: the bridge passes the controller's real voltage to Steam, but Steam's Switch 2 support (SDL) doesn't read battery for this controller, so Steam may show none. The status window shows high/medium/low from voltage, because Nintendo's voltage-to-percent curve isn't public.
 - Joy-Con support follows the same protocol as the Pro Controller, but has had less real-world testing.
 - Headset audio, NFC and the magnetometer aren't passed through (HIDMaestro's persona doesn't emulate them).
+- Power-off sends the shutdown command a Switch 2 sends its controllers when it sleeps. That command is documented over USB but not confirmed over Bluetooth, so the bridge also drops the Bluetooth link, which sends the controller to sleep either way.
+- Games with their own Switch controller support may read gyro directly through SDL, bypassing Steam Input, so Steam's gyro settings don't apply there. Turn off the game's own gyro or controller support to let Steam handle it.
 
 ## Credits
 

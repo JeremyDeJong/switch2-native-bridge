@@ -287,6 +287,32 @@ sealed class SwitchController : IAsyncDisposable
         }
     }
 
+    /// <summary>Asks the controller to shut down (command 06/02, which a Switch 2 sends its
+    /// controllers when it goes to sleep; documented over USB, unconfirmed over Bluetooth, and it
+    /// sends no reply), then drops the link. A Switch 2 controller that loses its link goes to
+    /// sleep on its own, so the controller ends up off either way.</summary>
+    public async Task PowerOffAsync()
+    {
+        try
+        {
+            var buffer = new byte[8 + 12];
+            buffer[0] = 0x06; buffer[1] = 0x91; buffer[2] = 0x01; buffer[3] = 0x02; buffer[5] = 12;
+            await _cmdWrite.WriteValueAsync(buffer.AsBuffer(), WriteOptionFor(_cmdWrite)).AsTask()
+                .WaitAsync(TimeSpan.FromSeconds(2));
+            Log.Info($"{Name}: sent power-off.");
+        }
+        catch (Exception e)
+        {
+            Log.Warn($"{Name}: power-off command failed ({e.Message}); disconnecting instead.");
+        }
+        try { _session.MaintainConnection = false; } catch (ObjectDisposedException) { }
+        PoweredOff = true;
+        RaiseDisconnected();
+    }
+
+    /// <summary>True when the session ended because the bridge turned the controller off.</summary>
+    public bool PoweredOff { get; private set; }
+
     public Task SetPlayerLedsAsync(byte pattern, CancellationToken ct) =>
         CommandAsync(CmdLeds, SubLedsSetPlayer, [pattern, 0, 0, 0], ct);
 

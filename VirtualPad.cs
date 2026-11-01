@@ -74,6 +74,22 @@ sealed class VirtualPad : IDisposable
     readonly Dictionary<ControllerKind, (long Reports, long Ticks, int Rate)> _rateWindow = [];
     long _lastRumbleTicks;
     readonly HashSet<ControllerKind> _batteryLogged = [];
+    readonly Dictionary<ControllerKind, LinkStats> _link = [];
+
+    // Battery: a sample a minute per controller, and one low-battery warning per connection.
+    const long BatterySampleMs = 60_000;
+    readonly Dictionary<ControllerKind, long> _lastBatterySample = [];
+    readonly Dictionary<ControllerKind, int> _lowSamples = [];
+    readonly HashSet<ControllerKind> _lowWarned = [];
+    readonly Action<string> _notify;
+
+    // Idle: the last time a button or stick moved (motion alone doesn't count, so a
+    // controller left on a desk still goes idle).
+    const int StickActivity = 60;
+    long _lastActivity = Environment.TickCount64;
+    uint _activityButtons;
+    int _activityL, _activityR;
+    int _rumbleSequence;
 
     // Rumble: newest packet wins, written by one loop so a slow link never queues up stale rumble.
     byte[]? _pendingRumble;
@@ -88,17 +104,19 @@ sealed class VirtualPad : IDisposable
     public ulong? RightAddress { get; private set; }
     public byte LedPattern => LedPatterns[(Number - 1) % LedPatterns.Length];
 
-    VirtualPad(int number, bool isJoyConPad, HMController pad)
+    VirtualPad(int number, bool isJoyConPad, HMController pad, Action<string> notify)
     {
         Number = number;
         IsJoyConPad = isJoyConPad;
         _pad = pad;
+        _notify = notify;
         _pad.OutputReceived += OnOutput;
         Submit();
         _rumbleLoop = Task.Run(RumbleLoop);
     }
 
-    public static VirtualPad Create(HMContext ctx, int number, bool isJoyConPad, FlashDump? pro, FlashDump? left, FlashDump? right, string identityKey)
+    public static VirtualPad Create(HMContext ctx, int number, bool isJoyConPad, FlashDump? pro, FlashDump? left, FlashDump? right,
+        string identityKey, Action<string> notify)
     {
         var (factory, user) = ComposeFlash(pro, left, right);
         var id = $"switch2-pro-bridge-{number}";
@@ -108,7 +126,7 @@ sealed class VirtualPad : IDisposable
         File.WriteAllText(Path.Combine(dir, id + ".json"), json.ToJsonString());
         ctx.LoadProfilesFromDirectory(dir);
         var profile = ctx.GetProfile(id) ?? throw new InvalidOperationException("HIDMaestro did not load the bridge profile.");
-        return new VirtualPad(number, isJoyConPad, ctx.CreateController(profile, identityKey));
+        return new VirtualPad(number, isJoyConPad, ctx.CreateController(profile, identityKey), notify);
     }
 
     public string Describe()
@@ -129,6 +147,7 @@ sealed class VirtualPad : IDisposable
         lock (_gate)
         {
             long now = Environment.TickCount64;
+            long stamp = System.Diagnostics.Stopwatch.GetTimestamp();
             var sides = new List<SideStatus>();
             void Side(ControllerKind kind, string name, SwitchController? live, ulong? owner)
             {
@@ -139,8 +158,11 @@ sealed class VirtualPad : IDisposable
                     _rateWindow[kind] = window = (seen.Reports, now,
                         (int)Math.Round((seen.Reports - window.Reports) * 1000.0 / (now - window.Ticks)));
                 int rate = live != null ? window.Rate : 0;
-                sides.Add(new SideStatus(name, live != null, live != null && seen.BatteryMv > 0 ? seen.BatteryMv : null,
-                    live != null && seen.ChargeState != 0, rate));
+                int? mv = live != null && seen.BatteryMv > 0 ? seen.BatteryMv : null;
+                var (avg, worst, stalls) = live != null && _link.TryGetValue(kind, out var link) ? link.Read(stamp) : (0, 0, 0);
+                sides.Add(new SideStatus(name, live != null, mv, live != null && seen.ChargeState != 0, rate,
+                    mv is int v && owner is ulong address ? BatteryLog.Percent(address, v) : null,
+                    avg, worst, stalls));
             }
             if (IsJoyConPad)
             {
@@ -160,6 +182,40 @@ sealed class VirtualPad : IDisposable
                 Axis(l & 0xFFF), 1 - Axis(l >> 12), Axis(r & 0xFFF), 1 - Axis(r >> 12),
                 [Gyro(54), Gyro(56), Gyro(58)],
                 now - Interlocked.Read(ref _lastRumbleTicks) < 300);
+        }
+    }
+
+    /// <summary>How long since a button was pressed or a stick moved.</summary>
+    public TimeSpan IdleFor => TimeSpan.FromMilliseconds(Environment.TickCount64 - Interlocked.Read(ref _lastActivity));
+
+    /// <summary>Turns off every controller feeding this pad.</summary>
+    public async Task PowerOffAsync(string reason)
+    {
+        SwitchController?[] live;
+        lock (_gate) live = [_pro, _left, _right];
+        foreach (var c in live.OfType<SwitchController>())
+        {
+            Log.Info($"Turning off {c.Name} (player {Number}): {reason}.");
+            await c.PowerOffAsync();
+        }
+    }
+
+    /// <summary>A short thump then a click on every controller feeding this pad, at the
+    /// current rumble strength, bypassing Steam.</summary>
+    public async Task TestRumbleAsync()
+    {
+        foreach (var (entry, ms) in new[] { (Rumble.Thump, 200), (Rumble.Stop, 30), (Rumble.Click, 150), (Rumble.Stop, 0) })
+        {
+            var packet = Rumble.Packet(entry, Interlocked.Increment(ref _rumbleSequence));
+            Rumble.Scale(packet, Settings.Current.RumbleStrength);
+            SwitchController?[] live;
+            lock (_gate) live = [_pro, _left, _right];
+            foreach (var c in live.OfType<SwitchController>())
+            {
+                try { await c.WriteRumbleAsync(packet); }
+                catch (Exception e) { Log.Warn($"Test rumble on {c.Name} failed: {e.Message}"); }
+            }
+            if (ms > 0) await Task.Delay(ms);
         }
     }
 
@@ -191,6 +247,11 @@ sealed class VirtualPad : IDisposable
                 case ControllerKind.JoyConLeft: _left = controller; LeftAddress = controller.Address; break;
                 default: _right = controller; RightAddress = controller.Address; break;
             }
+            _link[controller.Kind] = new LinkStats($"{controller.Name} (player {Number})");
+            _lowSamples.Remove(controller.Kind);
+            _lowWarned.Remove(controller.Kind);
+            _lastBatterySample[controller.Kind] = Environment.TickCount64 - BatterySampleMs + 5000; // first sample after 5 s
+            Interlocked.Exchange(ref _lastActivity, Environment.TickCount64);
         }
         controller.InputReport += report => OnReport(controller.Kind, report);
     }
@@ -200,6 +261,7 @@ sealed class VirtualPad : IDisposable
         lock (_gate)
         {
             _batteryLogged.Remove(controller.Kind);
+            if (_link.Remove(controller.Kind, out var link)) Log.Info(link.Summary());
             if (_pro == controller) _pro = null;
             if (_left == controller) _left = null;
             if (_right == controller) _right = null;
@@ -219,8 +281,11 @@ sealed class VirtualPad : IDisposable
     void OnReport(ControllerKind kind, byte[] report)
     {
         if (report.Length < 60) return;
+        long stamp = System.Diagnostics.Stopwatch.GetTimestamp();
+        (ulong Address, int Mv, bool Charging)? sample = null;
         lock (_gate)
         {
+            if (_link.TryGetValue(kind, out var link)) link.Report(stamp);
             _seen.TryGetValue(kind, out var seen);
             // 0x1F: battery voltage in mV; 0x21: charging state, non-zero on USB power
             // (switch2_controller_research, hid_reports.md, input report 0x05).
@@ -240,8 +305,72 @@ sealed class VirtualPad : IDisposable
                     source = other;
                 if (source == kind) report.AsSpan(BatteryAt, 4).CopyTo(_merged.AsSpan(BatteryAt));
             }
+
+            NoteActivity();
+
+            long now = Environment.TickCount64;
+            ulong? address = kind switch
+            {
+                ControllerKind.ProController => ProAddress,
+                ControllerKind.JoyConLeft => LeftAddress,
+                _ => RightAddress,
+            };
+            if (address != null && (!_lastBatterySample.TryGetValue(kind, out var last) || now - last >= BatterySampleMs))
+            {
+                _lastBatterySample[kind] = now;
+                sample = (address.Value, BitConverter.ToUInt16(report, BatteryAt), report[BatteryAt + 2] != 0);
+            }
         }
         Submit();
+        if (sample is { } s) _ = Task.Run(() => SampleBattery(kind, s.Address, s.Mv, s.Charging));
+    }
+
+    void SampleBattery(ControllerKind kind, ulong address, int millivolts, bool charging)
+    {
+        if (millivolts <= 0) return;
+        BatteryLog.Record(address, millivolts, charging);
+        bool low = !charging && BatteryLog.IsLow(address, millivolts);
+        string? warn = null;
+        lock (_gate)
+        {
+            // Two low samples in a row, so a dip under heavy rumble doesn't trigger it.
+            int count = low ? _lowSamples.GetValueOrDefault(kind) + 1 : 0;
+            _lowSamples[kind] = count;
+            if (count >= 2 && _lowWarned.Add(kind))
+            {
+                var name = kind switch
+                {
+                    ControllerKind.JoyConLeft => "Left Joy-Con",
+                    ControllerKind.JoyConRight => "Right Joy-Con",
+                    _ => "Pro Controller 2",
+                };
+                var pct = BatteryLog.Percent(address, millivolts);
+                warn = $"{name} (player {Number}) battery is low{(pct is int p ? $" (~{p}%)" : "")}. Charge it soon.";
+            }
+        }
+        if (warn != null)
+        {
+            Log.Warn(warn);
+            _notify(warn);
+        }
+    }
+
+    /// <summary>Marks the pad active when a button changes or a stick moves noticeably.
+    /// Call with _gate held, after _merged is updated.</summary>
+    void NoteActivity()
+    {
+        uint buttons = BitConverter.ToUInt32(_merged, 4);
+        int l = _merged[10] | _merged[11] << 8 | _merged[12] << 16;
+        int r = _merged[13] | _merged[14] << 8 | _merged[15] << 16;
+        static bool Moved(int a, int b) =>
+            Math.Abs((a & 0xFFF) - (b & 0xFFF)) > StickActivity || Math.Abs((a >> 12) - (b >> 12)) > StickActivity;
+        if (buttons != _activityButtons || Moved(l, _activityL) || Moved(r, _activityR))
+        {
+            _activityButtons = buttons;
+            _activityL = l;
+            _activityR = r;
+            Interlocked.Exchange(ref _lastActivity, Environment.TickCount64);
+        }
     }
 
     /// <summary>Folds one Joy-Con's report into the merged Pro-shaped report: its own
@@ -391,6 +520,7 @@ sealed class VirtualPad : IDisposable
         // Bytes after each block's header carry the motor amplitudes; all zero is "stop".
         if (rumble.AsSpan(1, 15).ContainsAnyExcept((byte)0) || rumble.AsSpan(17, 15).ContainsAnyExcept((byte)0))
             Interlocked.Exchange(ref _lastRumbleTicks, Environment.TickCount64);
+        Rumble.Scale(rumble, Settings.Current.RumbleStrength);
         Volatile.Write(ref _pendingRumble, rumble);
         try { _rumbleSignal.Release(); } catch (SemaphoreFullException) { }
     }

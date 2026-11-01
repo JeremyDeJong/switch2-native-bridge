@@ -100,6 +100,37 @@ static class SelfTest
         var (rf, _) = VirtualPad.ComposeFlash(null, null, rightFlash);
         Check(rf[0xE8] == 0x33 && rf[0xA8] != 0x33, "a lone right Joy-Con fills slot 2 and leaves slot 1 at defaults");
 
+        // Rumble strength scales both amplitudes and leaves frequencies and headers alone.
+        var thump = Rumble.Packet(Rumble.Thump, 3);
+        var half = (byte[])thump.Clone();
+        Rumble.Scale(half, 0.5);
+        Check(half.AsSpan().SequenceEqual(Rumble.Packet(Rumble.Entry(0x060, 0x1A8, 0x0C0, 0x128), 3)),
+            "rumble at 50% halves both amplitudes, keeps frequencies");
+        var full = (byte[])thump.Clone();
+        Rumble.Scale(full, 1.0);
+        Check(full.AsSpan().SequenceEqual(thump), "rumble at 100% passes through unchanged");
+        var none = (byte[])thump.Clone();
+        Rumble.Scale(none, 0);
+        Check(none.AsSpan().SequenceEqual(Rumble.Packet(Rumble.Entry(0x060, 0, 0x0C0, 0), 3)), "rumble at 0% is silent");
+
+        // Battery percentage only once a real range has been seen.
+        Check(BatteryLog.PercentFrom(3000, 3400, 200, 3200) == 50, "learned battery range maps mid-voltage to 50%");
+        Check(BatteryLog.PercentFrom(3000, 3400, 10, 3200) == null, "no percentage from too few samples");
+        Check(BatteryLog.PercentFrom(3100, 3150, 500, 3120) == null, "no percentage from too narrow a range");
+
+        // Updates: tags parse, and settings from 0.2-0.5 still read.
+        Check(Updater.ParseVersion("v0.6.0") == new Version(0, 6, 0) && Updater.ParseVersion("v1.2") == new Version(1, 2, 0),
+            "release tags parse as versions");
+        Check(Settings.FromJson("{\"autostartConfigured\":true}") is { AutostartConfigured: true, RumbleStrength: 1.0, IdleOffMinutes: 15 },
+            "the 0.5 settings file still reads, with new defaults");
+
+        // Link stats: steady 15 ms reports with one 80 ms gap is one stall, worst ~80 ms.
+        var stats = new LinkStats("selftest");
+        long tick = System.Diagnostics.Stopwatch.Frequency / 1000, t = 1;
+        for (int i = 0; i < 200; i++) { t += (i == 100 ? 80 : 15) * tick; stats.Report(t); }
+        var (avgGap, worstGap, stallCount) = stats.Read(t);
+        Check(stallCount == 1 && Math.Abs(worstGap - 80) < 1 && avgGap is > 14 and < 20, $"link stats: 1 stall, worst {worstGap:0} ms, avg {avgGap:0.0} ms");
+
         if (profileOutDir != null)
         {
             Directory.CreateDirectory(profileOutDir);

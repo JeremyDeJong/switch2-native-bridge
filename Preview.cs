@@ -25,6 +25,7 @@ static class Preview
                     app.ThemeMode = mode;
                     Render(app, Samples, Path.Combine(folder, $"status-{name}.png"));
                     Render(app, () => [], Path.Combine(folder, $"status-empty-{name}.png"));
+                    Render(app, () => [Samples()[0]], Path.Combine(folder, $"status-settings-{name}.png"), extras: true);
                 }
             }
             catch (Exception e)
@@ -40,20 +41,37 @@ static class Preview
 
     static PadStatus[] Samples() =>
     [
-        new(1, "Pro Controller 2", [new SideStatus("Pro", true, 3310, false, 68)], 0.5, 0.5, 0.7, 0.35, [0.3, 0.6, 0.15], true),
-        new(2, "Joy-Con pair", [new SideStatus("L", true, 3180, false, 67), new SideStatus("R", true, 3102, true, 66)], 0.4, 0.6, 0.5, 0.5, [0.45, 0.2, 0.5], false),
+        new(1, "Pro Controller 2", [new SideStatus("Pro", true, 3310, false, 68, 72, 14.7, 31, 0)], 0.5, 0.5, 0.7, 0.35, [0.3, 0.6, 0.15], true),
+        new(2, "Joy-Con pair", [new SideStatus("L", true, 3180, false, 67, null, 14.9, 46, 1), new SideStatus("R", true, 3102, true, 66, null, 15.1, 62, 2)],
+            0.4, 0.6, 0.5, 0.5, [0.45, 0.2, 0.5], false),
         new(3, "Pro Controller 2", [new SideStatus("Pro", false, null, false, 0)], 0.5, 0.5, 0.5, 0.5, [0, 0, 0], false),
     ];
 
-    static void Render(App app, Func<PadStatus[]> players, string file)
+    static void Render(App app, Func<PadStatus[]> players, string file, bool extras = false)
     {
         var window = new StatusWindow(app, players)
         {
             WindowStartupLocation = WindowStartupLocation.Manual,
             Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false,
         };
+        if (extras)
+        {
+            // The update banner and the open Settings section, at a height that fits them.
+            window.ShowUpdateBannerForPreview("0.7.0");
+            window.SettingsExpander.IsExpanded = true;
+            window.Height = 1000;
+        }
         window.Show();
         window.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+        if (extras)
+        {
+            // Let the Expander's open animation finish before capturing.
+            var frame = new DispatcherFrame();
+            var wait = new DispatcherTimer(TimeSpan.FromMilliseconds(900), DispatcherPriority.Normal,
+                (s, _) => { ((DispatcherTimer)s!).Stop(); frame.Continue = false; }, window.Dispatcher);
+            wait.Start();
+            Dispatcher.PushFrame(frame);
+        }
         var root = (FrameworkElement)window.Content;
         root.UpdateLayout();
         double scale = 1.5;

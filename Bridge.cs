@@ -25,7 +25,12 @@ sealed class Bridge : IDisposable
     readonly List<VirtualPad> _pads = [];
     readonly List<(SwitchController Controller, FlashDump? Flash, TaskCompletionSource<VirtualPad> Pad)> _waiting = [];
 
-    /// <summary>Raised when a controller connects or disconnects, with a short message.</summary>
+    // After the bridge turns a controller off, ignore its adverts briefly: they are its
+    // last reconnect attempts, not the user pressing a button.
+    static readonly TimeSpan QuietAfterPowerOff = TimeSpan.FromSeconds(10);
+    readonly Dictionary<ulong, long> _quietUntil = [];
+
+    /// <summary>Raised for things worth a notification: connects, disconnects, low battery.</summary>
     public event Action<string>? Changed;
 
     public Bridge(HMContext ctx, ulong hostAddress, CancellationToken ct)
@@ -39,7 +44,43 @@ sealed class Bridge : IDisposable
     public void Start()
     {
         _watcher.Start();
+        _ = Task.Run(IdleLoop);
         Log.Info("Press a button on a paired controller, or hold Sync on a new one to pair it.");
+    }
+
+    /// <summary>Turns off controllers left without input for the configured time.</summary>
+    async Task IdleLoop()
+    {
+        while (!_ct.IsCancellationRequested)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(30), _ct); }
+            catch (OperationCanceledException) { return; }
+            int minutes = Settings.Current.IdleOffMinutes;
+            if (minutes <= 0) continue;
+            VirtualPad[] pads;
+            lock (_gate) pads = [.. _pads];
+            foreach (var pad in pads.Where(p => p.IsLive && p.IdleFor >= TimeSpan.FromMinutes(minutes)))
+            {
+                await pad.PowerOffAsync($"no input for {minutes} min");
+                Changed?.Invoke($"Player {pad.Number} turned off after {minutes} min idle");
+            }
+        }
+    }
+
+    /// <summary>Turns off every connected controller, waiting at most a few seconds.</summary>
+    public async Task PowerOffAllAsync(string reason)
+    {
+        VirtualPad[] pads;
+        lock (_gate) pads = [.. _pads];
+        var all = Task.WhenAll(pads.Where(p => p.IsLive).Select(p => p.PowerOffAsync(reason)));
+        await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(4)));
+    }
+
+    public Task TestRumbleAsync(int player)
+    {
+        VirtualPad? pad;
+        lock (_gate) pad = _pads.FirstOrDefault(p => p.Number == player);
+        return pad?.TestRumbleAsync() ?? Task.CompletedTask;
     }
 
     public string[] Status()
@@ -81,6 +122,7 @@ sealed class Bridge : IDisposable
     {
         lock (_gate)
         {
+            if (_quietUntil.TryGetValue(address, out var until) && Environment.TickCount64 < until) return;
             if (_ct.IsCancellationRequested || !_active.Add(address)) return;
         }
         _ = Task.Run(async () =>
@@ -142,8 +184,16 @@ sealed class Bridge : IDisposable
             Changed?.Invoke($"{controller.Name} connected (player {pad.Number})");
 
             await disconnected.Task.WaitAsync(_ct);
-            Log.Warn($"{controller.Name} (player {pad.Number}) disconnected. Press a button on it to reconnect.");
-            Changed?.Invoke($"{controller.Name} disconnected");
+            if (controller.PoweredOff)
+            {
+                lock (_gate) _quietUntil[address] = Environment.TickCount64 + (long)QuietAfterPowerOff.TotalMilliseconds;
+                Log.Info($"{controller.Name} (player {pad.Number}) turned off. Press Home on it to wake it.");
+            }
+            else
+            {
+                Log.Warn($"{controller.Name} (player {pad.Number}) disconnected. Press a button on it to reconnect.");
+                Changed?.Invoke($"{controller.Name} disconnected");
+            }
         }
         finally
         {
@@ -242,7 +292,8 @@ sealed class Bridge : IDisposable
             while (_pads.Any(p => p.Number == number)) number++;
         }
         Log.Info($"Creating virtual wired Pro Controller 2 for player {number}...");
-        var pad = VirtualPad.Create(_ctx, number, isJoyConPad, pro, left, right, $"switch2bridge-{identityAddress:X12}");
+        var pad = VirtualPad.Create(_ctx, number, isJoyConPad, pro, left, right, $"switch2bridge-{identityAddress:X12}",
+            message => Changed?.Invoke(message));
         lock (_gate) _pads.Add(pad);
         return pad;
     }
