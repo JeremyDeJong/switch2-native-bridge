@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+    <!-- Windows Forms only for the tray icon (NotifyIcon); every window is WPF. -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <!-- ThemeMode (WPF's Windows 11 Fluent theme) is marked experimental. -->
+    <NoWarn>$(NoWarn);WPF0001</NoWarn>
+    <Version>0.2.0</Version>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Switch2Bridge</RootNamespace>
+    <AssemblyName>Switch2Bridge</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Self-contained single file: the .NET runtime here lives in the user's profile,
+         where a framework-dependent apphost would not find it. -->
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Keep Windows Forms names out of scope so they never clash with WPF's. -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+    <Using Include="System.IO" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="HIDMaestro.Core">
+      <HintPath>lib\HIDMaestro.Core.dll</HintPath>
+    </Reference>
+    <EmbeddedResource Include="switch2-pro-composite.json" LogicalName="switch2-pro-composite.json" />
+    <None Include="lib\HIDMaestro-*.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
