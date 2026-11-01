@@ -41,7 +41,7 @@ sealed class SwitchController : IAsyncDisposable
 
     readonly BluetoothLEDevice _device;
     readonly GattSession _session;
-    readonly IDisposable? _connectionParams;
+    IDisposable? _connectionParams;
     readonly GattCharacteristic _input, _cmdWrite, _cmdResponse;
     readonly Dictionary<Guid, GattCharacteristic> _vibration;
     readonly SemaphoreSlim _cmdLock = new(1, 1);
@@ -61,13 +61,12 @@ sealed class SwitchController : IAsyncDisposable
         _ => "Pro Controller 2",
     };
 
-    SwitchController(BluetoothLEDevice device, GattSession session, IDisposable? connectionParams,
+    SwitchController(BluetoothLEDevice device, GattSession session,
         GattCharacteristic input, GattCharacteristic cmdWrite, GattCharacteristic cmdResponse,
         Dictionary<Guid, GattCharacteristic> vibration)
     {
         _device = device;
         _session = session;
-        _connectionParams = connectionParams;
         _input = input;
         _cmdWrite = cmdWrite;
         _cmdResponse = cmdResponse;
@@ -93,20 +92,10 @@ sealed class SwitchController : IAsyncDisposable
         var device = await BluetoothLEDevice.FromBluetoothAddressAsync(address).AsTask(ct)
             ?? throw new InvalidOperationException($"Could not open Bluetooth device {Format(address)}.");
 
-        // Ask Windows to keep the link up and to use the fastest connection
-        // interval it allows; both matter for a 4 ms input stream.
+        // Ask Windows to keep the link up. The fast connection interval is requested
+        // once the link is up (RequestFastLinkAsync); Windows can ignore it before then.
         var session = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId).AsTask(ct);
         session.MaintainConnection = true;
-        IDisposable? connectionParams = null;
-        try
-        {
-            connectionParams = device.RequestPreferredConnectionParameters(
-                BluetoothLEPreferredConnectionParameters.ThroughputOptimized);
-        }
-        catch (Exception e)
-        {
-            Log.Warn($"Could not request throughput-optimized connection: {e.Message}");
-        }
 
         GattCharacteristic? input = null, cmdWrite = null, cmdResponse = null;
         var vibration = new Dictionary<Guid, GattCharacteristic>();
@@ -152,7 +141,7 @@ sealed class SwitchController : IAsyncDisposable
                 $"Could not read the controller's Bluetooth services{detail}. If another controller app (or an older copy of this bridge) is running, close it and press a button on the controller.");
         }
 
-        var controller = new SwitchController(device, session, connectionParams, input, cmdWrite, cmdResponse, vibration);
+        var controller = new SwitchController(device, session, input, cmdWrite, cmdResponse, vibration);
         try
         {
             cmdResponse.ValueChanged += (_, e) => controller._pendingResponse?.TrySetResult(e.CharacteristicValue.ToArray());
@@ -262,6 +251,40 @@ sealed class SwitchController : IAsyncDisposable
         await EnableNotify(_input, ct);
         await CommandAsync(CmdFeature, SubFeatureInit, [FeatureMotion, 0, 0, 0], ct);
         await CommandAsync(CmdFeature, SubFeatureEnable, [FeatureMotion, 0, 0, 0], ct);
+    }
+
+    /// <summary>Asks Windows for its fastest connection interval now that the link is up,
+    /// then logs what the link actually runs at.</summary>
+    public async Task RequestFastLinkAsync(CancellationToken ct)
+    {
+        try
+        {
+            _connectionParams?.Dispose();
+            var request = _device.RequestPreferredConnectionParameters(BluetoothLEPreferredConnectionParameters.ThroughputOptimized);
+            _connectionParams = request;
+            Log.Info($"{Name}: fast connection request {request.Status}.");
+        }
+        catch (Exception e)
+        {
+            Log.Warn($"{Name}: could not request a fast connection: {e.Message}");
+        }
+        await Task.Delay(1500, ct);
+        LogLink();
+    }
+
+    public void LogLink()
+    {
+        try
+        {
+            var p = _device.GetConnectionParameters();
+            var phy = _device.GetConnectionPhy();
+            Log.Info($"{Name}: link interval {p.ConnectionInterval * 1.25:0.##} ms, peripheral latency {p.ConnectionLatency}, " +
+                $"timeout {p.LinkTimeout * 10} ms, radio {(phy.TransmitInfo.IsUncoded2MPhy ? "2M" : phy.TransmitInfo.IsUncoded1MPhy ? "1M" : "coded")}.");
+        }
+        catch (Exception e)
+        {
+            Log.Warn($"{Name}: could not read link parameters: {e.Message}");
+        }
     }
 
     public Task SetPlayerLedsAsync(byte pattern, CancellationToken ct) =>

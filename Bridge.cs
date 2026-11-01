@@ -127,7 +127,7 @@ sealed class Bridge : IDisposable
             _connectGate.Release();
         }
 
-        await using var _ = controller;
+        await using var owned = controller;
         var disconnected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         controller.Disconnected += () => disconnected.TrySetResult();
 
@@ -138,6 +138,7 @@ sealed class Bridge : IDisposable
             await controller.StartInputAsync(_ct);
             await controller.SetPlayerLedsAsync(pad.LedPattern, _ct);
             Log.Ok($"{controller.Name} connected as player {pad.Number}.");
+            _ = controller.RequestFastLinkAsync(_ct).ContinueWith(_ => { }, TaskScheduler.Default);
             Changed?.Invoke($"{controller.Name} connected (player {pad.Number})");
 
             await disconnected.Task.WaitAsync(_ct);

@@ -73,6 +73,7 @@ sealed class VirtualPad : IDisposable
     readonly Dictionary<ControllerKind, (long Reports, int BatteryMv)> _seen = [];
     readonly Dictionary<ControllerKind, (long Reports, long Ticks, int Rate)> _rateWindow = [];
     long _lastRumbleTicks;
+    readonly HashSet<ControllerKind> _batteryLogged = [];
 
     // Rumble: newest packet wins, written by one loop so a slow link never queues up stale rumble.
     byte[]? _pendingRumble;
@@ -199,6 +200,7 @@ sealed class VirtualPad : IDisposable
     {
         lock (_gate)
         {
+            _batteryLogged.Remove(controller.Kind);
             if (_pro == controller) _pro = null;
             if (_left == controller) _left = null;
             if (_right == controller) _right = null;
@@ -222,6 +224,9 @@ sealed class VirtualPad : IDisposable
         {
             _seen.TryGetValue(kind, out var seen);
             _seen[kind] = (seen.Reports + 1, BitConverter.ToUInt16(report, BatteryAt));
+            if (_batteryLogged.Add(kind))
+                Log.Info($"Player {Number} {kind}: battery bytes {Convert.ToHexString(report, BatteryAt, 4)} " +
+                    $"= {BitConverter.ToUInt16(report, BatteryAt)} mV, current {BitConverter.ToInt16(report, BatteryAt + 2)} (raw).");
             if (kind == ControllerKind.ProController) report.AsSpan(0, Math.Min(report.Length, ReportLength)).CopyTo(_merged);
             else
             {
