@@ -66,7 +66,7 @@ dotnet publish -c Release -o release
 ## Known limits
 
 - Steam may label the device "Nintendo Switch Pro Controller" rather than "Switch 2".
-- Battery percentages are estimated from cell voltage.
+- Battery: the bridge passes the controller's real voltage to Steam, but Steam's Switch 2 support (SDL) doesn't read battery for this controller, so Steam may show none. The status window shows high/medium/low from voltage, because Nintendo's voltage-to-percent curve isn't public.
 - Joy-Con support follows the same protocol as the Pro Controller, but has had less real-world testing.
 - Headset audio, NFC and the magnetometer aren't passed through (HIDMaestro's persona doesn't emulate them).
 

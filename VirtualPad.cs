@@ -70,7 +70,7 @@ sealed class VirtualPad : IDisposable
 
     // Status-window figures per controller: reports seen, battery millivolts, and the
     // report rate measured over the last full second.
-    readonly Dictionary<ControllerKind, (long Reports, int BatteryMv)> _seen = [];
+    readonly Dictionary<ControllerKind, (long Reports, int BatteryMv, byte ChargeState)> _seen = [];
     readonly Dictionary<ControllerKind, (long Reports, long Ticks, int Rate)> _rateWindow = [];
     long _lastRumbleTicks;
     readonly HashSet<ControllerKind> _batteryLogged = [];
@@ -139,7 +139,8 @@ sealed class VirtualPad : IDisposable
                     _rateWindow[kind] = window = (seen.Reports, now,
                         (int)Math.Round((seen.Reports - window.Reports) * 1000.0 / (now - window.Ticks)));
                 int rate = live != null ? window.Rate : 0;
-                sides.Add(new SideStatus(name, live != null, live != null && seen.BatteryMv > 0 ? BatteryPercent(seen.BatteryMv) : null, rate));
+                sides.Add(new SideStatus(name, live != null, live != null && seen.BatteryMv > 0 ? seen.BatteryMv : null,
+                    live != null && seen.ChargeState != 0, rate));
             }
             if (IsJoyConPad)
             {
@@ -162,8 +163,6 @@ sealed class VirtualPad : IDisposable
         }
     }
 
-    /// <summary>A rough charge estimate from cell voltage (Li-ion, 3.5 V empty to 4.1 V full).</summary>
-    static int BatteryPercent(int millivolts) => Math.Clamp((int)Math.Round((millivolts - 3500) / 6.0), 0, 100);
 
     public bool Owns(ulong address) => ProAddress == address || LeftAddress == address || RightAddress == address;
 
@@ -223,10 +222,12 @@ sealed class VirtualPad : IDisposable
         lock (_gate)
         {
             _seen.TryGetValue(kind, out var seen);
-            _seen[kind] = (seen.Reports + 1, BitConverter.ToUInt16(report, BatteryAt));
+            // 0x1F: battery voltage in mV; 0x21: charging state, non-zero on USB power
+            // (switch2_controller_research, hid_reports.md, input report 0x05).
+            _seen[kind] = (seen.Reports + 1, BitConverter.ToUInt16(report, BatteryAt), report[BatteryAt + 2]);
             if (_batteryLogged.Add(kind))
-                Log.Info($"Player {Number} {kind}: battery bytes {Convert.ToHexString(report, BatteryAt, 4)} " +
-                    $"= {BitConverter.ToUInt16(report, BatteryAt)} mV, current {BitConverter.ToInt16(report, BatteryAt + 2)} (raw).");
+                Log.Info($"Player {Number} {kind}: battery {BitConverter.ToUInt16(report, BatteryAt)} mV, " +
+                    $"charging state 0x{report[BatteryAt + 2]:X2}.");
             if (kind == ControllerKind.ProController) report.AsSpan(0, Math.Min(report.Length, ReportLength)).CopyTo(_merged);
             else
             {

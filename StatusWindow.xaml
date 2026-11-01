@@ -43,7 +43,7 @@
 
                                     <StackPanel Grid.Column="1" Margin="14,0,12,0" VerticalAlignment="Center">
                                         <TextBlock Text="{Binding Title}" FontSize="15" FontWeight="SemiBold" />
-                                        <TextBlock Text="{Binding Detail}" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"
+                                        <TextBlock Text="{Binding Detail}" Margin="0,2,0,0" TextWrapping="Wrap"
                                                    Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
                                     </StackPanel>
 

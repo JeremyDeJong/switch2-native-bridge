@@ -5,7 +5,18 @@ using System.Windows.Threading;
 
 namespace Switch2Bridge;
 
-sealed record SideStatus(string Name, bool Live, int? BatteryPercent, int ReportsPerSecond);
+sealed record SideStatus(string Name, bool Live, int? BatteryMv, bool Charging, int ReportsPerSecond)
+{
+    /// <summary>Nintendo's own voltage-to-level curve isn't public; these are the thresholds
+    /// switch2controllerpc's authors settled on from real controllers.</summary>
+    public string? BatteryLevel => BatteryMv switch
+    {
+        null => null,
+        > 3250 => "high",
+        > 3125 => "medium",
+        _ => "low",
+    };
+}
 
 sealed record PadStatus(int Number, string Name, IReadOnlyList<SideStatus> Sides,
     double LX, double LY, double RX, double RY, double[] Gyro, bool Rumbling);
@@ -118,7 +129,8 @@ sealed class PadView : INotifyPropertyChanged
         {
             var prefix = s.Sides.Count > 1 ? side.Name + " " : "Battery ";
             if (!side.Live) parts.Add($"{side.Name} not connected");
-            else if (side.BatteryPercent is int pct) parts.Add($"{prefix}~{pct}%");
+            else if (side.BatteryMv is int mv)
+                parts.Add($"{prefix}{side.BatteryLevel} ({mv / 1000.0:0.00} V{(side.Charging ? ", charging" : "")})");
         }
         int rate = s.Sides.Where(x => x.Live).Select(x => x.ReportsPerSecond).DefaultIfEmpty(0).Max();
         if (rate > 0) parts.Add($"{rate} reports/s");

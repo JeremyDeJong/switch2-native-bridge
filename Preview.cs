@@ -40,9 +40,9 @@ static class Preview
 
     static PadStatus[] Samples() =>
     [
-        new(1, "Pro Controller 2", [new SideStatus("Pro", true, 80, 250)], 0.5, 0.5, 0.7, 0.35, [0.3, 0.6, 0.15], true),
-        new(2, "Joy-Con pair", [new SideStatus("L", true, 55, 248), new SideStatus("R", true, 61, 247)], 0.4, 0.6, 0.5, 0.5, [0.45, 0.2, 0.5], false),
-        new(3, "Pro Controller 2", [new SideStatus("Pro", false, null, 0)], 0.5, 0.5, 0.5, 0.5, [0, 0, 0], false),
+        new(1, "Pro Controller 2", [new SideStatus("Pro", true, 3310, false, 68)], 0.5, 0.5, 0.7, 0.35, [0.3, 0.6, 0.15], true),
+        new(2, "Joy-Con pair", [new SideStatus("L", true, 3180, false, 67), new SideStatus("R", true, 3102, true, 66)], 0.4, 0.6, 0.5, 0.5, [0.45, 0.2, 0.5], false),
+        new(3, "Pro Controller 2", [new SideStatus("Pro", false, null, false, 0)], 0.5, 0.5, 0.5, 0.5, [0, 0, 0], false),
     ];
 
     static void Render(App app, Func<PadStatus[]> players, string file)
