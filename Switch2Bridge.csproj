@@ -15,6 +15,7 @@
     <RootNamespace>Switch2Bridge</RootNamespace>
     <AssemblyName>Switch2Bridge</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>assets\app.ico</ApplicationIcon>
     <!-- Self-contained single file: the .NET runtime here lives in the user's profile,
          where a framework-dependent apphost would not find it. -->
     <SelfContained>true</SelfContained>
@@ -33,6 +34,9 @@
       <HintPath>lib\HIDMaestro.Core.dll</HintPath>
     </Reference>
     <EmbeddedResource Include="switch2-pro-composite.json" LogicalName="switch2-pro-composite.json" />
+    <EmbeddedResource Include="assets\app.ico" LogicalName="app.ico" />
+    <!-- Also as a WPF resource, for the windows' title-bar icon. -->
+    <Resource Include="assets\app.ico" />
     <None Include="lib\HIDMaestro-*.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

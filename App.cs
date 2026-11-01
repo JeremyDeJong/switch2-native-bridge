@@ -234,46 +234,27 @@ sealed class App : Application
     }
 }
 
-/// <summary>The tray icon: a small rounded "S2" badge, grey when idle, accent when live.</summary>
+/// <summary>The tray icon: the app icon (assets\app.ico) in colour when a controller is
+/// live, greyed out while waiting.</summary>
 static class TrayIcon
 {
     public static System.Drawing.Icon Make(bool live)
     {
-        var color = live ? AccentColor() : System.Drawing.Color.FromArgb(118, 118, 118);
-        using var bmp = new System.Drawing.Bitmap(32, 32);
-        using (var g = System.Drawing.Graphics.FromImage(bmp))
-        {
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-            using var brush = new System.Drawing.SolidBrush(color);
-            using var path = new System.Drawing.Drawing2D.GraphicsPath();
-            path.AddArc(1, 1, 12, 12, 180, 90);
-            path.AddArc(19, 1, 12, 12, 270, 90);
-            path.AddArc(19, 19, 12, 12, 0, 90);
-            path.AddArc(1, 19, 12, 12, 90, 90);
-            path.CloseFigure();
-            g.FillPath(brush, path);
-            using var font = new System.Drawing.Font("Segoe UI Variable Display", 13f, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Pixel);
-            var format = new System.Drawing.StringFormat
-            {
-                Alignment = System.Drawing.StringAlignment.Center,
-                LineAlignment = System.Drawing.StringAlignment.Center,
-            };
-            g.DrawString("S2", font, System.Drawing.Brushes.White, new System.Drawing.RectangleF(0, 1, 32, 32), format);
-        }
-        return System.Drawing.Icon.FromHandle(bmp.GetHicon());
-    }
+        var size = Forms.SystemInformation.SmallIconSize;
+        using var stream = typeof(TrayIcon).Assembly.GetManifestResourceStream("app.ico")!;
+        using var icon = new System.Drawing.Icon(stream, size);
+        if (live) return (System.Drawing.Icon)icon.Clone();
 
-    static System.Drawing.Color AccentColor()
-    {
-        try
-        {
-            var c = new Windows.UI.ViewManagement.UISettings().GetColorValue(Windows.UI.ViewManagement.UIColorType.Accent);
-            return System.Drawing.Color.FromArgb(c.R, c.G, c.B);
-        }
-        catch (Exception)
-        {
-            return System.Drawing.Color.FromArgb(0, 120, 212);
-        }
+        using var bmp = icon.ToBitmap();
+        for (int y = 0; y < bmp.Height; y++)
+            for (int x = 0; x < bmp.Width; x++)
+            {
+                var c = bmp.GetPixel(x, y);
+                int l = (int)(c.R * 0.3 + c.G * 0.59 + c.B * 0.11);
+                l = 70 + l * 60 / 255; // a mid grey tile that reads on light and dark taskbars
+                if (c.R > 230 && c.G > 230 && c.B > 230) l = 255; // keep the letters white
+                bmp.SetPixel(x, y, System.Drawing.Color.FromArgb(c.A, l, l, l));
+            }
+        return System.Drawing.Icon.FromHandle(bmp.GetHicon());
     }
 }

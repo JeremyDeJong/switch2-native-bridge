@@ -55,10 +55,13 @@ static class SelfTest
             var wired = Replay(ble, bits);
             randomOk = wired.AsSpan(5, 4).SequenceEqual(ble.AsSpan(4, 4))
                 && wired.AsSpan(11, 6).SequenceEqual(ble.AsSpan(10, 6))
-                && wired.AsSpan(49, 12).SequenceEqual(ble.AsSpan(48, 12));
+                && wired.AsSpan(49, 12).SequenceEqual(ble.AsSpan(48, 12))
+                && wired.AsSpan(32, 4).SequenceEqual(ble.AsSpan(31, 4));
             if (!randomOk) Check(false, $"random report {i} differs: ble {Convert.ToHexString(ble)} wired {Convert.ToHexString(wired)}");
         }
-        if (randomOk) Check(true, "2000 random reports: buttons, sticks and IMU arrive byte-for-byte");
+        if (randomOk) Check(true, "2000 random reports: buttons, sticks, IMU and battery arrive byte-for-byte");
+        Check(program.Any(op => (string?)op!["copy"] == "24-27" && (int?)op["to"] == 32),
+            "report 0x05 copies the battery bytes over the persona's fixed 3.8 V");
 
         // Joy-Con pair: each side keeps its own buttons and stick; motion follows the right Joy-Con.
         Check((VirtualPad.LeftJoyConButtons & VirtualPad.RightJoyConButtons) == 0, "Joy-Con button sets do not overlap");
@@ -85,6 +88,7 @@ static class SelfTest
         rng.NextBytes(lone);
         VirtualPad.Merge(leftOnly, ControllerKind.JoyConLeft, lone, rightIsLive: false);
         Check(leftOnly.AsSpan(48, 12).SequenceEqual(lone.AsSpan(48, 12)), "a lone left Joy-Con supplies motion");
+        Check(BitConverter.ToUInt16(VirtualPad.NeutralReport(), 31) == 3800, "a pad with no controller yet reports 3.8 V, not an empty battery");
 
         // Composed flash for a Joy-Con pair: left in stick slot 1, right in slot 2, Pro Controller 2 ID.
         var leftFlash = new FlashDump(Fill(0x140, 0x11), Fill(0x40, 0x22));
@@ -121,7 +125,7 @@ static class SelfTest
     /// persona's program does: the bits table, pack12 for the sticks, and the IMU copy.</summary>
     static byte[] Replay(byte[] ble, (int State, int Report)[] bits)
     {
-        Span<byte> state = stackalloc byte[24];
+        Span<byte> state = stackalloc byte[VirtualPad.StateBlockSize];
         VirtualPad.ToStateBlock(ble, state);
         var report = new byte[64];
         report[0] = 0x05;
@@ -130,6 +134,7 @@ static class SelfTest
         Pack12(state, 4, report, 11);
         Pack12(state, 8, report, 14);
         state[12..24].CopyTo(report.AsSpan(49));
+        state[24..28].CopyTo(report.AsSpan(32));
         return report;
     }
 

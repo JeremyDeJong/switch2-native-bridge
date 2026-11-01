@@ -21,8 +21,12 @@ sealed record FlashDump(byte[] Factory, byte[] User)
 /// </summary>
 sealed class VirtualPad : IDisposable
 {
-    const int StateBlockSize = 24;
+    // The stock persona's 24-byte state block, plus 4 bytes this bridge adds for battery
+    // voltage and current (the persona otherwise sends a fixed 3.8 V).
+    internal const int StateBlockSize = 28;
     const int ReportLength = 63;
+    const int BatteryAt = 31; // Bluetooth report: voltage (mV, u16) then current (u16)
+    const ushort DefaultBatteryMv = 3800;
 
     // Bluetooth input report button bit -> bit in HIDMaestro's state block for the
     // switch2-pro-controller-composite profile (its stateBlock and report 0x05 "bits" table).
@@ -64,9 +68,10 @@ sealed class VirtualPad : IDisposable
     readonly byte[] _merged = NeutralReport();
     SwitchController? _pro, _left, _right;
 
-    // Status-window figures: reports seen and battery millivolts per controller.
+    // Status-window figures per controller: reports seen, battery millivolts, and the
+    // report rate measured over the last full second.
     readonly Dictionary<ControllerKind, (long Reports, int BatteryMv)> _seen = [];
-    readonly Dictionary<ControllerKind, (long Reports, long Ticks)> _lastRate = [];
+    readonly Dictionary<ControllerKind, (long Reports, long Ticks, int Rate)> _rateWindow = [];
     long _lastRumbleTicks;
 
     // Rumble: newest packet wins, written by one loop so a slow link never queues up stale rumble.
@@ -128,11 +133,11 @@ sealed class VirtualPad : IDisposable
             {
                 if (live == null && owner == null) return;
                 _seen.TryGetValue(kind, out var seen);
-                int rate = 0;
-                if (live != null && _lastRate.TryGetValue(kind, out var last) && now > last.Ticks)
-                    rate = (int)Math.Round((seen.Reports - last.Reports) * 1000.0 / (now - last.Ticks));
-                if (!_lastRate.TryGetValue(kind, out var prev) || now - prev.Ticks >= 1000) _lastRate[kind] = (seen.Reports, now);
-                else if (live != null && now > prev.Ticks) rate = (int)Math.Round((seen.Reports - prev.Reports) * 1000.0 / (now - prev.Ticks));
+                if (!_rateWindow.TryGetValue(kind, out var window)) _rateWindow[kind] = window = (seen.Reports, now, 0);
+                else if (now - window.Ticks >= 1000)
+                    _rateWindow[kind] = window = (seen.Reports, now,
+                        (int)Math.Round((seen.Reports - window.Reports) * 1000.0 / (now - window.Ticks)));
+                int rate = live != null ? window.Rate : 0;
                 sides.Add(new SideStatus(name, live != null, live != null && seen.BatteryMv > 0 ? BatteryPercent(seen.BatteryMv) : null, rate));
             }
             if (IsJoyConPad)
@@ -216,9 +221,19 @@ sealed class VirtualPad : IDisposable
         lock (_gate)
         {
             _seen.TryGetValue(kind, out var seen);
-            _seen[kind] = (seen.Reports + 1, BitConverter.ToUInt16(report, 31));
+            _seen[kind] = (seen.Reports + 1, BitConverter.ToUInt16(report, BatteryAt));
             if (kind == ControllerKind.ProController) report.AsSpan(0, Math.Min(report.Length, ReportLength)).CopyTo(_merged);
-            else Merge(_merged, kind, report, _right != null);
+            else
+            {
+                Merge(_merged, kind, report, _right != null);
+                // One pad, one battery: report whichever Joy-Con is lower.
+                var source = kind;
+                var other = kind == ControllerKind.JoyConLeft ? ControllerKind.JoyConRight : ControllerKind.JoyConLeft;
+                if ((other == ControllerKind.JoyConLeft ? _left : _right) != null
+                    && _seen.TryGetValue(other, out var o) && o.BatteryMv > 0 && o.BatteryMv < _seen[kind].BatteryMv)
+                    source = other;
+                if (source == kind) report.AsSpan(BatteryAt, 4).CopyTo(_merged.AsSpan(BatteryAt));
+            }
         }
         Submit();
     }
@@ -249,6 +264,9 @@ sealed class VirtualPad : IDisposable
         // Both sticks centred (2048, 2048), packed 12 bits each.
         report[10] = 0x00; report[11] = 0x08; report[12] = 0x80;
         report[13] = 0x00; report[14] = 0x08; report[15] = 0x80;
+        // Until a controller reports, the persona's own default charge.
+        BitConverter.TryWriteBytes(report.AsSpan(BatteryAt), DefaultBatteryMv);
+        report[BatteryAt + 2] = 0x20;
         return report;
     }
 
@@ -279,6 +297,9 @@ sealed class VirtualPad : IDisposable
         // Accelerometer and gyro: the persona copies these 12 bytes verbatim into
         // report 0x05, where a wired pad carries the same raw sensor words.
         report.Slice(48, 12).CopyTo(state[12..]);
+
+        // Battery voltage and current, copied to the same place in report 0x05.
+        report.Slice(BatteryAt, 4).CopyTo(state[24..]);
     }
 
     static void WriteStick(Span<byte> dest, ReadOnlySpan<byte> packed)
@@ -338,12 +359,17 @@ sealed class VirtualPad : IDisposable
         return (factory, user);
     }
 
-    /// <summary>The persona's profile with this pad's id and flash image.</summary>
+    /// <summary>The persona's profile with this pad's id and flash image, and a state block
+    /// grown by 4 bytes that report 0x05 copies over its fixed battery bytes.</summary>
     internal static JsonObject ProfileJson(string id, byte[] factory, byte[] user)
     {
         var json = Template();
         json["id"] = id;
         json["name"] = "Nintendo Switch 2 Pro Controller (Bluetooth bridge)";
+        json["stateBlock"]!["size"] = StateBlockSize;
+        var common = json["inputReports"]!.AsArray().Single(r => (string?)r!["reportId"] == "0x05")!;
+        // Report byte = Bluetooth byte + 1 (the report ID), so voltage and current land at 32-35.
+        common["program"]!.AsArray().Add(new JsonObject { ["copy"] = "24-27", ["to"] = BatteryAt + 1 });
         var segments = json["protocol"]!["memory"]![0]!["segments"]!.AsArray();
         segments.Clear();
         segments.Add(new JsonObject { ["at"] = $"0x{FlashDump.FactoryAddress:X}", ["hex"] = Convert.ToHexString(factory) });
