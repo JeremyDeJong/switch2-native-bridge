@@ -1,0 +1,8 @@
+<Project>
+  <!-- Every build output (bin, obj, publish) goes under artifacts\. Release exes go to
+       artifacts\release via tools\build.ps1. -->
+  <PropertyGroup>
+    <UseArtifactsOutput>true</UseArtifactsOutput>
+    <ArtifactsPath>$(MSBuildThisFileDirectory)artifacts</ArtifactsPath>
+  </PropertyGroup>
+</Project>

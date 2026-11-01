@@ -1,6 +1,5 @@
-bin/
-obj/
-publish/
-release/
+# All build output: bin, obj, publish and release exes (see Directory.Build.props, tools\build.ps1).
+artifacts/
 design/project/
+# Pre-0.5 output folders, until the last one is deleted.
 release-*/

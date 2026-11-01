@@ -27,7 +27,7 @@ Steam only supports the Switch 2 Pro Controller over USB. On Bluetooth, the exis
 
 ## Install
 
-1. Download `Switch2Bridge.exe` from Releases, or build it (below).
+1. Download `Switch2Bridge-v<version>.exe` from Releases, or build it (below). Keep it somewhere permanent, because Start with Windows runs it from that location.
 2. If you've paired the controller in Windows' Bluetooth settings, **remove it there**. The bridge connects to it directly.
 3. Close any other Switch 2 bridge app (e.g. switch2pc) so they don't fight over the controller.
 4. Run `Switch2Bridge.exe` and approve the admin prompt. The first run:
@@ -58,8 +58,10 @@ Controller ──BLE GATT──▶ Switch2Bridge ──HIDMaestro──▶ virtu
 Requires the .NET 10 SDK.
 
 ```
-dotnet publish -c Release -o release
+powershell -NoProfile -File tools\build.ps1
 ```
+
+This builds, runs the self-test, and writes `artifacts\release\Switch2Bridge-v<version>.exe` with a `.sha256` file next to it. All build output (bin, obj, publish, release) lives under `artifacts\`. The exe name includes the version, so a running bridge never blocks the next build.
 
 `lib/HIDMaestro.Core.dll` is HIDMaestro v2.1.0 from its [official release](https://github.com/hifihedgehog/HIDMaestro/releases/tag/v2.1.0) (release zip SHA-256 `7fe349f163864b8dfc36117af260d51bac94a2263b6cdfa719cb364a808397b4`).
 
