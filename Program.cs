@@ -19,6 +19,15 @@ static class Program
             return 0;
         }
 
+        // Versions before 0.2 took no mutex, so look for them by name too.
+        int self = Environment.ProcessId;
+        if (Process.GetProcessesByName("Switch2Bridge").Any(p => p.Id != self))
+        {
+            MessageBox.Show("Another copy of Switch 2 Native Bridge is running (an older version may still be open in a console window). Close it, then start the bridge again.",
+                "Switch 2 Native Bridge", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return 1;
+        }
+
         if (Process.GetProcessesByName("switch2pc").Length > 0)
         {
             MessageBox.Show("switch2pc.exe is running and would grab the controllers too. Close it, then start the bridge again.",

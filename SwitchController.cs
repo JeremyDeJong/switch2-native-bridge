@@ -110,19 +110,27 @@ sealed class SwitchController : IAsyncDisposable
 
         GattCharacteristic? input = null, cmdWrite = null, cmdResponse = null;
         var vibration = new Dictionary<Guid, GattCharacteristic>();
+        var problems = new List<string>();
         for (int attempt = 1; attempt <= 3 && (input == null || cmdWrite == null || cmdResponse == null); attempt++)
         {
+            if (attempt > 1) await Task.Delay(1000, ct);
+            problems.Clear();
             var services = await device.GetGattServicesAsync(BluetoothCacheMode.Uncached).AsTask(ct);
             if (services.Status != GattCommunicationStatus.Success)
             {
-                Log.Warn($"GATT service discovery failed ({services.Status}), retry {attempt}/3");
-                await Task.Delay(1000, ct);
+                problems.Add($"service discovery: {services.Status}");
+                Log.Warn($"GATT service discovery failed ({services.Status}), attempt {attempt}/3");
                 continue;
             }
             foreach (var service in services.Services)
             {
                 var chars = await service.GetCharacteristicsAsync(BluetoothCacheMode.Uncached).AsTask(ct);
-                if (chars.Status != GattCommunicationStatus.Success) continue;
+                if (chars.Status != GattCommunicationStatus.Success)
+                {
+                    // AccessDenied here usually means another app holds the controller.
+                    problems.Add($"service {service.Uuid}: {chars.Status}");
+                    continue;
+                }
                 foreach (var c in chars.Characteristics)
                 {
                     if (c.Uuid == InputReportUuid) input = c;
@@ -132,12 +140,16 @@ sealed class SwitchController : IAsyncDisposable
                         vibration[c.Uuid] = c;
                 }
             }
+            if (input == null || cmdWrite == null || cmdResponse == null)
+                Log.Warn($"Controller services not readable yet, attempt {attempt}/3{(problems.Count > 0 ? ": " + string.Join("; ", problems) : "")}");
         }
         if (input == null || cmdWrite == null || cmdResponse == null)
         {
             session.Dispose();
             device.Dispose();
-            throw new InvalidOperationException("The controller did not expose the expected GATT characteristics.");
+            var detail = problems.Count > 0 ? $" ({string.Join("; ", problems)})" : "";
+            throw new InvalidOperationException(
+                $"Could not read the controller's Bluetooth services{detail}. If another controller app (or an older copy of this bridge) is running, close it and press a button on the controller.");
         }
 
         var controller = new SwitchController(device, session, connectionParams, input, cmdWrite, cmdResponse, vibration);
