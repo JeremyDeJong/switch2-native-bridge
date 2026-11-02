@@ -80,7 +80,7 @@ Sections marked *Needs Joy-Cons* or similar can be skipped if you don't have the
 - [ ] 10.1 Plug in the headset. Settings → **Run audio test**, follow the prompts. **Expect:** about 22 seconds with the controller's input paused, a result message, and the results saying normal input came back. Check the controller works straight afterwards, and that Steam saw nothing held down.
 - [ ] 10.2 Send me the `.txt` from **Open results** (not the `.bin`, which may contain your voice). This decides whether headphone audio is worth pursuing.
 
-- [ ] 10.3 *Headphones needed, but don't wear them.* Turn the controller's volume low and hold them near your ear. Settings → **Play test sounds**, confirm. Click where you hear each sound as soon as you hear it, and **Stop** if it's unpleasant. **Expect:** under 2 minutes, then a result, and the controller works again. Send me the newest `sounds-*.txt` from **Open results**, even if you heard nothing.
+- [ ] 10.3 *Headphones needed, but don't wear them. Unplug any USB cable first.* Turn the controller's volume low and hold them near your ear. Settings → **Play test sounds**, confirm. Click where you hear each sound as soon as you hear it, and **Stop** if it's unpleasant. **Expect:** about a minute of noises from the controller, not clean audio, then a result, and the controller works again. Send me the newest `sounds-*.txt` from **Open results**, even if you heard nothing.
 
 ## 11. Joy-Cons (*needs Joy-Cons*)
 

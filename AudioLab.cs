@@ -7,66 +7,117 @@ using Concentus.Enums;
 namespace Switch2Bridge;
 
 /// <summary>
-/// An experiment to work out the Pro Controller's headphone audio. On firmware 2.1.4, a quiet
-/// Opus tone sent to the "Output Report (Headset Audio)" channel as report ID, state byte,
-/// length, then frame was audible from the controller's body, in repeated runs, with normal
-/// input running. Every odd state byte up to 0x0F played and every even one didn't, so bit 0
-/// turns audio on. This test plays a melody, the same tone at rising levels in case the
-/// headphones were just too quiet, then the higher state bits with audio on, to look for what
-/// sends it to the headphones. It only writes to that
-/// documented audio channel, never the neighbouring "Unknown + Command" channel, where stray
-/// bytes could be taken as real controller commands.
+/// An experiment to work out the Pro Controller's headphone audio. No audio has been sent
+/// successfully. On firmware 2.1.4, packets on the "Output Report (Headset Audio)" channel with
+/// bit 0 of the second byte set make glitchy noises and rumble from the controller instead of
+/// the tone sent, most likely its own built-in sounds. No state byte or level reached the
+/// headphones, so this test keeps the state byte fixed and tries different packet shapes instead:
+/// other first bytes, a longer packet, and two blocks, since the controller's own audio reports
+/// are 112 bytes. A melody and the known layout come first: a clean melody would be real audio. It only writes to that documented audio channel, never the neighbouring
+/// "Unknown + Command" channel, where stray bytes could be taken as real controller commands.
 /// </summary>
 sealed class AudioLab(SwitchController controller)
 {
     internal enum Heard { Nothing, Controller, Headphones }
 
+    internal enum Shape { Plain, AlternatingState, CounterFirst, MirrorInput, PaddedLong, TwoBlocks, EmptyThenBlock }
+
     /// <summary>One thing to play. Melody steps change note each second.</summary>
-    internal readonly record struct Step(byte State, bool Melody, int Seconds, short Level = ToneLevel)
+    internal readonly record struct Step(string Name, Shape Shape = Shape.Plain, byte Id = ReportId, bool Stereo = false, bool Melody = false, int Seconds = 2)
     {
-        public override string ToString() => Melody ? "rising melody" : Level != ToneLevel ? $"state 0x{State:X2} at level {Level}" : $"state 0x{State:X2}";
+        public override string ToString() => Name;
     }
 
     internal const int AudioBlock = 0x32;
-    const byte ReportId = 0x00;
+    internal const byte ReportId = 0x00;
+    internal const int LongPacket = 112; // the size of the controller's own audio reports
+    const int ReportStateAt = 0xD, ReportLengthAt = 0xE, ReportDataAt = 0xF;
     const byte KnownAudibleState = 0x0D;
     const int FrameMs = 20, SampleRate = 48000, FrameSamples = SampleRate * FrameMs / 1000;
     const short ToneLevel = 800;      // about -32 dB of full scale
-    internal const short LoudestLevel = 3200; // about -20 dB; encoding at this bitrate can peak about twice that
     const double ToneHz = 660;
     static readonly double[] MelodyHz = [523.25, 587.33, 659.25, 698.46, 783.99];
     static readonly TimeSpan Gap = TimeSpan.FromSeconds(1);
 
-    internal static readonly Step[] Steps = BuildSteps();
-
-    static Step[] BuildSteps()
-    {
-        var steps = new List<Step> { new(KnownAudibleState, true, MelodyHz.Length) };
-        // Louder, in case the headphones were working and just too quiet to notice.
-        foreach (short level in new short[] { ToneLevel, 1600, LoudestLevel }) steps.Add(new(KnownAudibleState, false, 2, level));
-        // Each mix of the high bits, with audio on: alone, and with the bits the controller
-        // itself reports when headphones are in.
-        for (int high = 1; high <= 0x0F; high++)
-        {
-            steps.Add(new((byte)(high << 4 | 0x01), false, 2));
-            steps.Add(new((byte)(high << 4 | KnownAudibleState), false, 2));
-        }
-        return [.. steps];
-    }
+    internal static readonly Step[] Steps =
+    [
+        new("rising melody", Melody: true, Seconds: 5),
+        new("the known layout"),
+        new("stereo", Stereo: true),
+        new("state alternating 0x05 and 0x0D", Shape.AlternatingState),
+        new("first byte 0x01", Id: 0x01),
+        new("first byte 0x02", Id: 0x02),
+        new("first byte 0x03", Id: 0x03),
+        new("first byte 0x05", Id: 0x05),
+        new("first byte 0x09", Id: 0x09),
+        new("a counter as the first byte", Shape.CounterFirst),
+        new("laid out like the controller's own reports", Shape.MirrorInput),
+        new("padded to 112 bytes", Shape.PaddedLong),
+        new("two audio blocks per packet", Shape.TwoBlocks),
+        new("an empty block, then audio", Shape.EmptyThenBlock),
+    ];
 
     public static TimeSpan TotalTime => Steps.Aggregate(TimeSpan.Zero, (t, s) => t + TimeSpan.FromSeconds(s.Seconds) + Gap);
 
-    /// <summary>One packet for the output channel: report ID, state, block length, then the
+    /// <summary>One packet for the output channel: first byte, state, block length, then the
     /// Opus frame padded to the 50-byte block, mirroring the input report's audio block.</summary>
-    internal static byte[] BuildPacket(byte state, ReadOnlySpan<byte> opus)
+    internal static byte[] BuildPacket(byte state, ReadOnlySpan<byte> opus, byte first = ReportId)
     {
         if (opus.Length > AudioBlock) throw new ArgumentException("Opus frame too long for the block.", nameof(opus));
         var packet = new byte[3 + AudioBlock];
-        packet[0] = ReportId;
+        packet[0] = first;
         packet[1] = state;
         packet[2] = AudioBlock;
         opus.CopyTo(packet.AsSpan(3));
         return packet;
+    }
+
+    /// <summary>The packet a step sends. <paramref name="second"/> is only used by two blocks.</summary>
+    internal static byte[] BuildShaped(Step step, int sequence, ReadOnlySpan<byte> opus, ReadOnlySpan<byte> second = default)
+    {
+        byte counter = (byte)sequence;
+        switch (step.Shape)
+        {
+            case Shape.AlternatingState:
+                return BuildPacket(sequence % 2 == 0 ? (byte)0x05 : KnownAudibleState, opus);
+            case Shape.CounterFirst:
+                return BuildPacket(KnownAudibleState, opus, counter);
+            case Shape.MirrorInput:
+            {
+                var packet = new byte[LongPacket];
+                packet[0] = counter;
+                packet[ReportStateAt] = KnownAudibleState;
+                packet[ReportLengthAt] = AudioBlock;
+                opus.CopyTo(packet.AsSpan(ReportDataAt));
+                return packet;
+            }
+            case Shape.PaddedLong:
+            {
+                var packet = new byte[LongPacket];
+                BuildPacket(KnownAudibleState, opus).CopyTo(packet, 0);
+                return packet;
+            }
+            case Shape.TwoBlocks:
+            {
+                var packet = new byte[3 + AudioBlock + 2 + AudioBlock];
+                BuildPacket(KnownAudibleState, opus).CopyTo(packet, 0);
+                packet[3 + AudioBlock] = KnownAudibleState;
+                packet[4 + AudioBlock] = AudioBlock;
+                second.CopyTo(packet.AsSpan(5 + AudioBlock));
+                return packet;
+            }
+            case Shape.EmptyThenBlock:
+            {
+                var packet = new byte[5 + AudioBlock];
+                packet[1] = KnownAudibleState;
+                packet[3] = KnownAudibleState;
+                packet[4] = AudioBlock;
+                opus.CopyTo(packet.AsSpan(5));
+                return packet;
+            }
+            default:
+                return BuildPacket(KnownAudibleState, opus, step.Id);
+        }
     }
 
     /// <summary>The note a melody step plays at a given moment.</summary>
@@ -89,14 +140,14 @@ sealed class AudioLab(SwitchController controller)
     }
 
     /// <summary>The next 20 ms of a quiet tone as one Opus frame.</summary>
-    internal static byte[] EncodeToneFrame(IOpusEncoder encoder, bool stereo, double hz, ref double phase, short level = ToneLevel)
+    internal static byte[] EncodeToneFrame(IOpusEncoder encoder, bool stereo, double hz, ref double phase)
     {
         int channels = stereo ? 2 : 1;
         var pcm = new short[FrameSamples * channels];
         double step = 2 * Math.PI * hz / SampleRate;
         for (int i = 0; i < FrameSamples; i++)
         {
-            short sample = (short)(Math.Sin(phase) * level);
+            short sample = (short)(Math.Sin(phase) * ToneLevel);
             phase += step;
             for (int c = 0; c < channels; c++) pcm[i * channels + c] = sample;
         }
@@ -160,8 +211,11 @@ sealed class AudioLab(SwitchController controller)
 
     async Task PlayAsync(Step step, Tally tally, CancellationToken ct)
     {
-        var encoder = NewEncoder(stereo: false);
+        var encoder = NewEncoder(step.Stereo);
         double phase = 0;
+        bool two = step.Shape == Shape.TwoBlocks;
+        int interval = two ? FrameMs * 2 : FrameMs;
+        int sequence = 0;
         var play = TimeSpan.FromSeconds(step.Seconds);
         var clock = Stopwatch.StartNew();
         long next = 0;
@@ -169,7 +223,9 @@ sealed class AudioLab(SwitchController controller)
         {
             ct.ThrowIfCancellationRequested();
             double hz = step.Melody ? MelodyNote(clock.Elapsed) : ToneHz;
-            var packet = BuildPacket(step.State, EncodeToneFrame(encoder, false, hz, ref phase, step.Level));
+            var opus = EncodeToneFrame(encoder, step.Stereo, hz, ref phase);
+            var second = two ? EncodeToneFrame(encoder, step.Stereo, hz, ref phase) : [];
+            var packet = BuildShaped(step, sequence++, opus, second);
             try
             {
                 var status = await controller.WriteHeadsetOutputAsync(packet);
@@ -181,7 +237,7 @@ sealed class AudioLab(SwitchController controller)
                 tally.Failed++;
                 tally.FirstError ??= e.Message;
             }
-            next += FrameMs;
+            next += interval;
             while (clock.ElapsedMilliseconds < next) await Task.Delay(1, ct);
         }
     }

@@ -42,8 +42,9 @@ Steam only supports the Switch 2 Pro Controller over USB. On Bluetooth, the exis
 | Install location, Start Menu entry and Windows uninstall | Built |
 | In-app updates and automatic GitHub releases | Built, waiting on a first release |
 | Headset audio test (listen only) | Confirmed with headphones, not yet with a mic |
-| Test sounds through the headphone jack | Built, experimental |
-| Audio through the headphone jack, and a Windows output device for it | **Not working**: see [Known limits](#known-limits) |
+| Test sounds on the Bluetooth audio channel | Built, experimental: only triggers the controller's own noises, not audio |
+| Headphone jack over USB, using the controller's own Windows sound device | Confirmed with the bridge closed |
+| Headphone jack over Bluetooth, and a Windows output device for it | **Not working**: see [Known limits](#known-limits) |
 | Non-Steam games | **Not working**: see [Known limits](#known-limits) |
 | NFC, magnetometer, waking the PC with the controller | **Not supported** |
 
@@ -134,7 +135,7 @@ To publish a release, set `<Version>` in `Switch2Bridge.csproj`, add its patch n
 ## Known limits
 
 - **Non-Steam games get no input.** Per HIDMaestro's notes, only Steam (and SDL with libusb) can read this virtual controller. Add a game to Steam to use it.
-- **Headphone jack audio doesn't work.** The controller's Bluetooth audio format is undocumented, and another active project, [switch2-pro-controller-windows](https://github.com/jony25/switch2-pro-controller-windows), lists it as unsolved too. Working it out needs a capture of a real Switch 2 sending audio to the controller. **Run audio test** in Settings shows what your controller sends; the controller's input pauses during it, because on firmware 2.1.4 the audio channel replaces the normal input stream while it's on. The silence frames on that channel look like Opus (`F8 FF FE`). An Opus tone sent as report ID, state, length, then frame was audible from the controller's body, but not the headphones. **Play test sounds** is working on that. An untested setting could be loud, so don't wear headphones for it.
+- **Headphone jack audio doesn't work over Bluetooth.** It does over USB: plugged in, the controller appears in Windows as its own Headphones and Microphone devices. Quit the bridge first, because plugging in with it running caused stray inputs and opened Magnifier once, for a reason not yet known. The controller's Bluetooth audio format is undocumented, and another active project, [switch2-pro-controller-windows](https://github.com/jony25/switch2-pro-controller-windows), lists it as unsolved too. Working it out needs a capture of a real Switch 2 sending audio to the controller. **Run audio test** in Settings shows what your controller sends; the controller's input pauses during it, because on firmware 2.1.4 the audio channel replaces the normal input stream while it's on. The silence frames on that channel look like Opus (`F8 FF FE`). No audio has been sent successfully over Bluetooth. **Play test sounds** gets glitchy noises and rumble from the controller instead of its melody, most likely the controller's own built-in sounds, whatever audio is sent. Don't wear headphones for it, because an untested setting could be loud.
 - **Input delay.** A Switch 2 talks to its controllers every 5 ms. Windows' limit is 7.5 ms, and one test PC settled on 15 ms (about 68 reports a second).
 - **The exe isn't code-signed**, so SmartScreen warns about it. That needs a paid certificate.
 - **Steam's label and battery.** Steam may call the device "Nintendo Switch Pro Controller". The bridge passes the real battery voltage to Steam, but SDL's Switch 2 driver doesn't read battery, so Steam may show none.
@@ -147,14 +148,20 @@ To publish a release, set `<Version>` in `Switch2Bridge.csproj`, add its patch n
 
 No version has been published as a GitHub Release yet. Dates are when each was built.
 
+### 0.9.3 (2026-11-02)
+
+- Headphones work over USB: plugged in, the controller appears in Windows as its own Headphones and Microphone devices, and sound through the jack was confirmed. Over Bluetooth, no state byte or level has reached the jack. Quit the bridge before plugging in for now, because plugging in with it running caused stray inputs and opened Magnifier once. The cause isn't known yet.
+- **Play test sounds** now tries different packet shapes, as one more attempt at Bluetooth headphone audio. None reached the headphones.
+- Correction to 0.9.0 to 0.9.2: no audio was sent successfully over Bluetooth. Listening closely, the test gave glitchy noises and rumble, not the melody it sends, so these were most likely the controller's own built-in sounds.
+
 ### 0.9.2 (2026-11-02)
 
-- Bit 0 of the audio packet's state byte turns audio on: every odd value up to 0x0F played and every even one didn't. Test sounds now tries the higher bits with audio on, and a tone at rising levels in case the headphones were only too quiet.
+- Bit 0 of the second byte of a packet on the audio channel seems to trigger a sound from the controller: every odd value up to 0x0F did and every even one didn't. This isn't our audio playing (see the correction in 0.9.3). Test sounds now tries the higher bits with that bit set, and a tone at rising levels in case the headphones were only too quiet.
 - The audio test and test sounds can no longer run at the same time.
 
 ### 0.9.1 (2026-11-02)
 
-- First sound from the controller. On firmware 2.1.4, an Opus tone sent to the headset audio channel as report ID, state, length, then frame was audible from the controller's body, in repeated runs, with normal input running. It hasn't reached the headphones yet.
+- On firmware 2.1.4, packets sent to the headset audio channel as report ID, state, length, then Opus frame made a noise from the controller's body, in repeated runs, with normal input running. It didn't reach the headphones, and it wasn't our audio playing (see the correction in 0.9.3).
 - **Play test sounds** now plays a melody, to tell real audio from a buzz, then tries 20 state values to look for headphone routing, with separate buttons for where you hear each one.
 
 ### 0.9.0 (2026-11-02)

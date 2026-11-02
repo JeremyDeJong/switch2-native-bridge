@@ -309,26 +309,24 @@ static class SelfTest
             }
             Check(peak is > 200 and < 3000, $"test sounds: {(stereo ? "stereo" : "mono")} tone decodes and stays quiet (peak {peak})");
         }
-        var levelSteps = AudioLab.Steps.Skip(1).Take(3).ToList();
-        var bitSteps = AudioLab.Steps.Skip(4).ToList();
-        Check(AudioLab.Steps[0].Melody && levelSteps.All(st => st.State == 0x0D) && levelSteps.Select(st => st.Level).Distinct().Count() == 3, "test sounds: a melody, then one tone at 3 levels");
-        Check(bitSteps.Count == 30 && bitSteps.All(st => (st.State & 1) == 1 && st.State >= 0x10) && bitSteps.Select(st => st.State).Distinct().Count() == 30, "test sounds: 30 high-bit states, each with audio switched on");
-        Check(AudioLab.TotalTime < TimeSpan.FromMinutes(2), $"test sounds: finishes in under 2 minutes ({AudioLab.TotalTime.TotalSeconds:0} s)");
-        var loudEncoder = AudioLab.NewEncoder(false);
-        var loudDecoder = Concentus.OpusCodecFactory.CreateDecoder(48000, 1);
-        var loudPcm = new short[960];
-        double loudPhase = 0;
-        int loudPeak = 0;
-        for (int i = 0; i < 20; i++)
-        {
-            loudDecoder.Decode(AudioLab.EncodeToneFrame(loudEncoder, false, 660, ref loudPhase, AudioLab.LoudestLevel), loudPcm, 960, false);
-            if (i >= 10) loudPeak = Math.Max(loudPeak, loudPcm.Max(s => Math.Abs((int)s)));
-        }
-        Check(loudPeak is > 1000 and < 13000, $"test sounds: the loudest tone stays well below full scale (peak {loudPeak})");
+        Check(AudioLab.Steps[0].Melody && AudioLab.Steps.Select(st => st.Name).Distinct().Count() == AudioLab.Steps.Length, "test sounds: a melody first, and every step different");
+        Check(AudioLab.Steps[1] is { Shape: AudioLab.Shape.Plain, Id: AudioLab.ReportId, Stereo: false }, "test sounds: the known layout plays second, as a check");
+        Check(AudioLab.TotalTime < TimeSpan.FromSeconds(90), $"test sounds: finishes in under 90 s ({AudioLab.TotalTime.TotalSeconds:0} s)");
         Check(AudioLab.MelodyNote(TimeSpan.Zero) < AudioLab.MelodyNote(TimeSpan.FromSeconds(2.5)) && AudioLab.MelodyNote(TimeSpan.FromSeconds(2.5)) < AudioLab.MelodyNote(TimeSpan.FromSeconds(99)), "test sounds: the melody rises and holds its last note");
         byte[] opusFrame = [0xF8, 0xAA];
         Check(AudioLab.BuildPacket(0x0D, opusFrame) is [0, 0x0D, 0x32, 0xF8, 0xAA, 0, ..] and { Length: 53 }, "test sounds: the audible layout is report ID, state, length, frame");
         Check(AudioLab.BuildPacket(0x40, opusFrame) is [0, 0x40, ..], "test sounds: the state byte goes where intended");
+        byte[] secondFrame = [0xF8, 0xBB];
+        byte[] Shaped(AudioLab.Shape shape, byte id = AudioLab.ReportId, int sequence = 0) => AudioLab.BuildShaped(new("test", shape, id), sequence, opusFrame, secondFrame);
+        Check(Shaped(AudioLab.Shape.Plain, 0x09) is [0x09, 0x0D, 0x32, 0xF8, 0xAA, ..] and { Length: 53 }, "test sounds: a chosen first byte");
+        Check(Shaped(AudioLab.Shape.AlternatingState, sequence: 0) is [0, 0x05, ..] && Shaped(AudioLab.Shape.AlternatingState, sequence: 1) is [0, 0x0D, ..], "test sounds: the state alternates as the controller's own does");
+        Check(Shaped(AudioLab.Shape.CounterFirst, sequence: 257) is [0x01, 0x0D, 0x32, ..], "test sounds: the counter wraps in the first byte");
+        var mirrored = Shaped(AudioLab.Shape.MirrorInput, sequence: 7);
+        Check(mirrored is { Length: 112 } && mirrored[0] == 7 && mirrored[0xD] == 0x0D && mirrored[0xE] == 0x32 && mirrored[0xF] == 0xF8 && mirrored[0x10] == 0xAA, "test sounds: the report layout matches the controller's own");
+        Check(Shaped(AudioLab.Shape.PaddedLong) is [0, 0x0D, 0x32, 0xF8, 0xAA, ..] and { Length: 112 }, "test sounds: padded to the report size");
+        var twoBlocks = Shaped(AudioLab.Shape.TwoBlocks);
+        Check(twoBlocks is { Length: 105 } && twoBlocks[3] == 0xF8 && twoBlocks[53] == 0x0D && twoBlocks[54] == 0x32 && twoBlocks[55] == 0xF8 && twoBlocks[56] == 0xBB, "test sounds: two blocks carry two frames");
+        Check(Shaped(AudioLab.Shape.EmptyThenBlock) is [0, 0x0D, 0, 0x0D, 0x32, 0xF8, 0xAA, ..] and { Length: 55 }, "test sounds: an empty block comes before the audio");
 
         // Audio probe: the documented firmware reply and report layout, and honest verdicts.
         var fw = FirmwareInfo.Parse(Convert.FromHexString("01000E010C000000FFFFFFFF"));

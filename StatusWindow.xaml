@@ -208,7 +208,7 @@
                         </StackPanel>
                         <TextBlock x:Name="ProbeStatus" Margin="0,8,0,0" TextWrapping="Wrap" />
                         <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                   Text="Test sounds plays a melody, then tries the settings that might send sound to the headphone jack. Keep headphones plugged in but off your ears, because an untested setting could be loud. It takes under 2 minutes, and Steam gets no input from this controller meanwhile." />
+                                   Text="Test sounds plays a melody, then tries the packet shapes that might send sound to the headphone jack. Keep headphones plugged in but off your ears, because an untested setting could be loud. It takes about a minute, and Steam gets no input from this controller meanwhile." />
                         <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                             <Button x:Name="SoundsButton" Content="Play test sounds" Margin="0,0,8,0" Click="OnPlaySounds" />
                             <Button x:Name="HeardControllerButton" Content="From the controller" Margin="0,0,8,0" IsEnabled="False" Click="OnHeardController" />

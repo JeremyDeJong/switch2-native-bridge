@@ -310,9 +310,9 @@ public partial class StatusWindow : Window
             return;
         }
         var answer = MessageBox.Show(
-            "This sends sound to the controller's undocumented audio channel: a short melody, a tone at rising levels, then each setting that might route it to the headphones.\n\n" +
+            "This sends sound to the controller's undocumented audio channel: a short melody, then each packet shape that might route it to the headphones.\n\n" +
             "Don't wear your headphones. An untested setting could make a loud noise. Plug them into the controller and hold them near your ear, not on it, with the controller's volume low.\n\n" +
-            "Listen closely to both, and click where you hear each sound straight away. Steam gets no input from this controller for under 2 minutes.\n\n" +
+            "Listen closely to both, and click where you hear each sound straight away. Steam gets no input from this controller for about a minute.\n\n" +
             "No one has documented this channel, so there's a small unknown risk to the controller. Carry on?",
             "Play test sounds", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
         if (answer != MessageBoxResult.Yes) return;
