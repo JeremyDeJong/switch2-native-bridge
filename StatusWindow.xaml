@@ -31,7 +31,7 @@
                 <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
                     <TextBlock x:Name="UpdateTitle" FontWeight="SemiBold" />
                     <TextBlock x:Name="UpdateStatus" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                               Text="Your controllers stay connected while it updates." />
+                               Text="Your controllers reconnect after it restarts." />
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                     <Button x:Name="ReleaseNotesButton" Content="What's new" Margin="0,0,8,0" Click="OnReleaseNotes" />
@@ -43,6 +43,27 @@
 
         <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
             <StackPanel>
+                <ItemsControl x:Name="Checks" Focusable="False" Visibility="Collapsed" Margin="0,0,0,4">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border CornerRadius="8" Padding="14,10" Margin="0,0,0,8" BorderThickness="1"
+                                    Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="&#xE7BA;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Margin="0,2,10,0"
+                                               AutomationProperties.Name="Warning"
+                                               Foreground="{DynamicResource AccentFillColorDefaultBrush}" />
+                                    <TextBlock Grid.Column="1" Text="{Binding}" TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
                 <ItemsControl x:Name="Pads" Focusable="False">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
@@ -72,8 +93,26 @@
                                                    Visibility="{Binding ActionsVisibility}"
                                                    ToolTip="Gaps between Bluetooth updates. A stall is a gap of 50 ms or more, which you can feel as a hitch."
                                                    Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                                        <Button Content="Test rumble" Margin="0,8,0,0" HorizontalAlignment="Left"
-                                                Visibility="{Binding ActionsVisibility}" Tag="{Binding Number}" Click="OnTestRumble" />
+                                        <WrapPanel Margin="0,2,0,0" Visibility="{Binding ActionsVisibility}">
+                                            <TextBlock Text="{Binding FirmwareDetail}" Margin="0,0,10,0" TextWrapping="Wrap"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="&#xE946;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Margin="0,0,5,0"
+                                                           VerticalAlignment="Center" AutomationProperties.Name="Information"
+                                                           Foreground="{DynamicResource AccentFillColorDefaultBrush}" />
+                                                <TextBlock Text="Please use a Nintendo Switch to update firmware."
+                                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                            </StackPanel>
+                                        </WrapPanel>
+                                        <CheckBox Content="Hold sideways, as its own controller" Margin="0,6,0,0" Tag="{Binding Number}"
+                                                  IsChecked="{Binding IsSideways, Mode=OneWay}" Visibility="{Binding SidewaysVisibility}" Click="OnSidewaysClick" />
+                                        <WrapPanel Margin="0,8,0,0" Visibility="{Binding ActionsVisibility}">
+                                            <Button Content="Rename" Margin="0,0,6,6" Tag="{Binding Number}" Click="OnRename" />
+                                            <Button Content="Test rumble" Margin="0,0,6,6" Tag="{Binding Number}" Click="OnTestRumble" />
+                                            <Button Content="Test inputs" Margin="0,0,6,6" Tag="{Binding Number}" Click="OnTestInputs" />
+                                            <Button Content="{Binding RecordLabel}" Margin="0,0,6,6" Tag="{Binding Number}" Click="OnRecord"
+                                                    ToolTip="Steam and games don't receive this controller's input while it records." />
+                                        </WrapPanel>
                                     </StackPanel>
 
                                     <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center"
@@ -143,7 +182,31 @@
                             <TextBlock x:Name="VersionText" VerticalAlignment="Center"
                                        Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
                         </StackPanel>
-                        <Button Content="Open battery logs" HorizontalAlignment="Left" Margin="0,12,0,0" Click="OnOpenBatteryLogs" />
+                        <StackPanel Orientation="Horizontal" Margin="0,12,0,16">
+                            <Button Content="Open battery logs" Margin="0,0,8,0" Click="OnOpenBatteryLogs" />
+                            <Button Content="Open firmware record" Click="OnOpenFirmwareRecord" />
+                        </StackPanel>
+
+                        <TextBlock Text="Input debugging" FontWeight="SemiBold" />
+                        <CheckBox x:Name="LogInputsBox" Content="Keep a log of controller inputs (last 7 days, stays on this PC)" Margin="0,6,0,0" Click="OnLogInputsClick" />
+                        <StackPanel Orientation="Horizontal" Margin="0,6,0,16">
+                            <Button Content="Open input logs" Margin="0,0,8,0" Click="OnOpenInputLogs" />
+                            <Button Content="Open recordings" Click="OnOpenRecordings" />
+                        </StackPanel>
+
+                        <TextBlock Text="Bug reports" FontWeight="SemiBold" />
+                        <TextBlock Margin="0,4,0,0" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   Text="Saves a zip of versions, setup and recent logs for you to review and attach. Nothing is sent anywhere. Bluetooth addresses and your Windows user name are removed." />
+                        <Button Content="Create diagnostics report" HorizontalAlignment="Left" Margin="0,8,0,16" Click="OnCreateDiagnostics" />
+
+                        <TextBlock Text="Headset audio experiment" FontWeight="SemiBold" />
+                        <TextBlock Margin="0,4,0,0" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   Text="Headphone jack audio doesn't work yet. This 22-second test only listens, to see what a Pro Controller sends with a mic headset plugged in." />
+                        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                            <Button x:Name="ProbeButton" Content="Run audio test" Margin="0,0,8,0" Click="OnRunProbe" />
+                            <Button Content="Open results" Click="OnOpenProbeResults" />
+                        </StackPanel>
+                        <TextBlock x:Name="ProbeStatus" Margin="0,8,0,0" TextWrapping="Wrap" />
                     </StackPanel>
                 </Expander>
             </StackPanel>

@@ -22,6 +22,8 @@ Write-Host "==> Building and running the self-test..." -ForegroundColor Cyan
 if ($LASTEXITCODE -ne 0) { throw "Build failed." }
 & $dotnet "artifacts\bin\Switch2Bridge\release_win-x64\Switch2Bridge.dll" --selftest
 if ($LASTEXITCODE -ne 0) { throw "Self-test failed." }
+& $dotnet "artifacts\bin\Switch2Bridge\release_win-x64\Switch2Bridge.dll" --check-recordings "tests\recordings"
+if ($LASTEXITCODE -ne 0) { throw "Recording replay failed." }
 
 Write-Host "==> Publishing the single-file exe..." -ForegroundColor Cyan
 & $dotnet publish -c Release --nologo -v quiet

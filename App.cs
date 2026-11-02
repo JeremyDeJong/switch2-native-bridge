@@ -34,6 +34,21 @@ sealed class App : Application
     public UpdateInfo? AvailableUpdate { get; private set; }
     public event Action? UpdateChanged;
 
+    /// <summary>The latest setup check results; replaced, never changed in place.</summary>
+    public IReadOnlyList<string> SetupWarnings { get; private set; } = [];
+    DispatcherTimer? _checkTimer;
+
+    async Task RunSetupChecksAsync()
+    {
+        var facts = await SetupChecks.GatherAsync(_bridge?.AnyLive == true);
+        var warnings = SetupChecks.Evaluate(facts);
+        if (!warnings.SequenceEqual(SetupWarnings))
+        {
+            foreach (var warning in warnings.Except(SetupWarnings)) Log.Warn($"Setup check: {warning}");
+            SetupWarnings = warnings;
+        }
+    }
+
     public App(bool justUpdated = false)
     {
         _justUpdated = justUpdated;
@@ -54,6 +69,7 @@ sealed class App : Application
     {
         base.OnStartup(e);
         if (_previewOnly) return;
+        InputCapture.Start();
         DispatcherUnhandledException += (_, args) =>
         {
             Log.Error($"UI error: {args.Exception.Message}");
@@ -114,6 +130,11 @@ sealed class App : Application
                 if (pe.Mode == Microsoft.Win32.PowerModes.Suspend && Settings.Current.OffOnSleep && _bridge != null)
                     _bridge.PowerOffAllAsync("PC going to sleep").Wait(TimeSpan.FromSeconds(4));
             };
+
+            _checkTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
+            _checkTimer.Tick += async (_, _) => await RunSetupChecksAsync();
+            _checkTimer.Start();
+            await RunSetupChecksAsync();
 
             if (_justUpdated)
                 _tray?.ShowBalloonTip(3000, "Switch 2 Native Bridge", $"Updated to v{Updater.Current.ToString(3)}.", Forms.ToolTipIcon.Info);
@@ -204,8 +225,8 @@ sealed class App : Application
         UpdateChanged?.Invoke();
     }
 
-    /// <summary>Downloads, verifies and starts the update, then exits. Controllers stay on:
-    /// the new version picks them up within seconds.</summary>
+    /// <summary>Downloads, verifies and starts the update, then exits. Controllers aren't
+    /// turned off, so the new version can reconnect them.</summary>
     public async Task InstallUpdateAsync(IProgress<string> progress)
     {
         if (AvailableUpdate is not { } update) return;
@@ -297,7 +318,7 @@ sealed class App : Application
         if (_bridge == null) return [StartupState];
         var pads = _bridge.Snapshot();
         if (pads.Length == 0) return ["No controllers yet"];
-        return pads.Select(p => $"Player {p.Number}: {p.Name}, {(p.Sides.Any(s => s.Live) ? "connected" : "waiting")}");
+        return pads.Select(p => $"Player {p.Number}: {p.DisplayName},{(p.Sides.Any(s => s.Live) ? "connected" : "waiting")}");
     }
 
     void UpdateTrayIcon()
@@ -318,11 +339,13 @@ sealed class App : Application
         _quitting = true;
         Log.Info("Shutting down.");
         _updateTimer?.Stop();
+        _checkTimer?.Stop();
         if (powerOff && _bridge != null) await _bridge.PowerOffAllAsync("bridge closing");
         _cts.Cancel();
         _window?.Close();
         if (_tray != null) _tray.Visible = false;
         _bridge?.Dispose();
+        InputCapture.Shutdown();
         _ctx?.Dispose();
         _tray?.Dispose();
         Shutdown();

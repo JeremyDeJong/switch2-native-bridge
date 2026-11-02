@@ -82,6 +82,11 @@ sealed class VirtualPad : IDisposable
     readonly Dictionary<ControllerKind, int> _lowSamples = [];
     readonly HashSet<ControllerKind> _lowWarned = [];
     readonly Action<string> _notify;
+    readonly Dictionary<ControllerKind, PowerInfo> _power = [];
+    readonly Dictionary<ControllerKind, (FirmwareInfo? Info, bool HeadsetChannel)> _firmware = [];
+    // The low-battery warning's level. The notes give the 0-9 scale but no meaning for
+    // each step, so "1 of 9" is this bridge's choice.
+    const int LowLevel = 1;
 
     // Idle: the last time a button or stick moved (motion alone doesn't count, so a
     // controller left on a desk still goes idle).
@@ -115,8 +120,11 @@ sealed class VirtualPad : IDisposable
         _rumbleLoop = Task.Run(RumbleLoop);
     }
 
+    /// <summary>The address this pad's name and player number are remembered under.</summary>
+    public ulong IdentityAddress { get; private init; }
+
     public static VirtualPad Create(HMContext ctx, int number, bool isJoyConPad, FlashDump? pro, FlashDump? left, FlashDump? right,
-        string identityKey, Action<string> notify)
+        string identityKey, Action<string> notify, ulong identityAddress)
     {
         var (factory, user) = ComposeFlash(pro, left, right);
         var id = $"switch2-pro-bridge-{number}";
@@ -126,7 +134,11 @@ sealed class VirtualPad : IDisposable
         File.WriteAllText(Path.Combine(dir, id + ".json"), json.ToJsonString());
         ctx.LoadProfilesFromDirectory(dir);
         var profile = ctx.GetProfile(id) ?? throw new InvalidOperationException("HIDMaestro did not load the bridge profile.");
-        return new VirtualPad(number, isJoyConPad, ctx.CreateController(profile, identityKey), notify);
+        return new VirtualPad(number, isJoyConPad, ctx.CreateController(profile, identityKey), notify)
+        {
+            IdentityAddress = identityAddress,
+            _sideways = isJoyConPad && Settings.ControllerSideways(identityAddress),
+        };
     }
 
     public string Describe()
@@ -140,6 +152,89 @@ sealed class VirtualPad : IDisposable
     }
 
     public bool IsLive { get { lock (_gate) return _pro != null || _left != null || _right != null; } }
+
+    /// <summary>Played as one sideways Joy-Con. Never true once both sides have joined.</summary>
+    public bool Sideways { get { lock (_gate) return IsSideways; } }
+    bool IsSideways => _sideways && IsJoyConPad && (LeftAddress == null || RightAddress == null);
+    volatile bool _sideways;
+
+    public void SetSideways(bool sideways)
+    {
+        lock (_gate)
+        {
+            _sideways = sideways;
+            // Nothing stays held across the change of layout.
+            NeutralReport().CopyTo(_merged, 0);
+        }
+        Settings.SetControllerSideways(IdentityAddress, sideways);
+        Submit();
+    }
+
+    // Player lights: the bridge's own until Steam sets some.
+    byte _steamLights;
+    public byte CurrentLights { get { lock (_gate) return _steamLights != 0 ? _steamLights : LedPattern; } }
+
+    /// <summary>Passes on lights Steam has set on the virtual controller, if they've changed.</summary>
+    public async Task SyncPlayerLightsAsync(CancellationToken ct)
+    {
+        byte lights;
+        try { lights = (byte)(_pad.DeviceProtocol?.GetRegister("playerLeds") ?? 0); }
+        catch (Exception e) when (e is ArgumentException or ObjectDisposedException) { return; }
+
+        SwitchController?[] live;
+        lock (_gate)
+        {
+            if (lights == 0 || lights == _steamLights) return;
+            _steamLights = lights;
+            live = [_pro, _left, _right];
+        }
+        Log.Info($"Player {Number}: Steam set the lights to 0x{lights:X2}.");
+        foreach (var c in live.OfType<SwitchController>())
+        {
+            try { await c.SetPlayerLedsAsync(lights, ct); }
+            catch (Exception e) when (e is InvalidOperationException or TimeoutException)
+            {
+                Log.Warn($"{c.Name}: couldn't set Steam's lights: {e.Message}");
+            }
+        }
+    }
+
+    readonly Dictionary<ControllerKind, long> _lastReport = [];
+
+    /// <summary>Ends sessions that have stopped sending reports, so the controller can
+    /// reconnect. After sleep, for example, Windows can still call a dead link connected.</summary>
+    public void EndStaleSessions(TimeSpan after)
+    {
+        long now = Environment.TickCount64;
+        var stale = new List<SwitchController>();
+        lock (_gate)
+            foreach (var c in new[] { _pro, _left, _right }.OfType<SwitchController>())
+                if (_lastReport.TryGetValue(c.Kind, out var last) && now - last > after.TotalMilliseconds) stale.Add(c);
+        foreach (var c in stale)
+        {
+            Log.Warn($"{c.Name} (player {Number}): no reports for {after.TotalSeconds:0} s, ending the connection.");
+            c.EndSession();
+        }
+    }
+
+    public SwitchController? LivePro { get { lock (_gate) return _pro; } }
+
+    public void SetFirmware(ControllerKind kind, FirmwareInfo? firmware, bool headsetChannel)
+    {
+        lock (_gate) _firmware[kind] = (firmware, headsetChannel);
+        Log.Info($"Player {Number} {kind}: {firmware?.ToString() ?? "firmware unknown"}, headset audio channel {(headsetChannel ? "present" : "absent")}.");
+        if (firmware != null) FirmwareSupport.Record(kind, firmware, headsetChannel);
+    }
+
+    public void SetPower(ControllerKind kind, PowerInfo power)
+    {
+        lock (_gate)
+        {
+            if (!_power.ContainsKey(kind))
+                Log.Info($"Player {Number} {kind}: battery level {power.Level} of {PowerInfo.MaxLevel}, external power {power.ExternalPower}, charging {power.Charging}.");
+            _power[kind] = power;
+        }
+    }
 
     /// <summary>What the status window shows for this pad, right now.</summary>
     public PadStatus Snapshot()
@@ -160,9 +255,12 @@ sealed class VirtualPad : IDisposable
                 int rate = live != null ? window.Rate : 0;
                 int? mv = live != null && seen.BatteryMv > 0 ? seen.BatteryMv : null;
                 var (avg, worst, stalls) = live != null && _link.TryGetValue(kind, out var link) ? link.Read(stamp) : (0, 0, 0);
-                sides.Add(new SideStatus(name, live != null, mv, live != null && seen.ChargeState != 0, rate,
+                var power = live != null ? _power.GetValueOrDefault(kind) : null;
+                var firmware = live != null && _firmware.TryGetValue(kind, out var f) ? f : (Info: null, HeadsetChannel: false);
+                sides.Add(new SideStatus(name, live != null, mv, power?.Charging ?? (live != null && seen.ChargeState != 0), rate,
                     mv is int v && owner is ulong address ? BatteryLog.Percent(address, v) : null,
-                    avg, worst, stalls));
+                    avg, worst, stalls, power?.Level, firmware.Info, firmware.HeadsetChannel,
+                    firmware.Info != null && FirmwareSupport.IsTested(kind, firmware.Info.Firmware)));
             }
             if (IsJoyConPad)
             {
@@ -177,11 +275,18 @@ sealed class VirtualPad : IDisposable
             double Gyro(int at) => Math.Min(1, Math.Abs(BitConverter.ToInt16(_merged, at)) / 6000.0);
             return new PadStatus(
                 Number,
-                IsJoyConPad ? "Joy-Con pair" : "Pro Controller 2",
+                !IsJoyConPad ? "Pro Controller 2"
+                    : LeftAddress != null && RightAddress != null ? "Joy-Con pair"
+                    : LeftAddress != null ? "Joy-Con (L)" : "Joy-Con (R)",
                 sides,
                 Axis(l & 0xFFF), 1 - Axis(l >> 12), Axis(r & 0xFFF), 1 - Axis(r >> 12),
                 [Gyro(54), Gyro(56), Gyro(58)],
-                now - Interlocked.Read(ref _lastRumbleTicks) < 300);
+                now - Interlocked.Read(ref _lastRumbleTicks) < 300,
+                BitConverter.ToUInt32(_merged, 4),
+                IsIsolated,
+                Settings.ControllerName(IdentityAddress),
+                IsJoyConPad && (LeftAddress == null || RightAddress == null),
+                IsSideways);
         }
     }
 
@@ -252,15 +357,21 @@ sealed class VirtualPad : IDisposable
             _lowWarned.Remove(controller.Kind);
             _lastBatterySample[controller.Kind] = Environment.TickCount64 - BatterySampleMs + 5000; // first sample after 5 s
             Interlocked.Exchange(ref _lastActivity, Environment.TickCount64);
+            _lastReport[controller.Kind] = Environment.TickCount64;
         }
+        InputCapture.Note(Number, controller.Kind, "connected");
         controller.InputReport += report => OnReport(controller.Kind, report);
     }
 
     public void Detach(SwitchController controller)
     {
+        InputCapture.Note(Number, controller.Kind, "disconnected");
         lock (_gate)
         {
             _batteryLogged.Remove(controller.Kind);
+            _power.Remove(controller.Kind);
+            _firmware.Remove(controller.Kind);
+            _lastReport.Remove(controller.Kind);
             if (_link.Remove(controller.Kind, out var link)) Log.Info(link.Summary());
             if (_pro == controller) _pro = null;
             if (_left == controller) _left = null;
@@ -271,6 +382,7 @@ sealed class VirtualPad : IDisposable
             switch (controller.Kind)
             {
                 case ControllerKind.ProController: neutral.CopyTo(_merged, 0); break;
+                case var _ when IsSideways: neutral.CopyTo(_merged, 0); break;
                 case ControllerKind.JoyConLeft: Merge(_merged, controller.Kind, neutral, _right != null); break;
                 default: Merge(_merged, controller.Kind, neutral, false); break;
             }
@@ -282,10 +394,12 @@ sealed class VirtualPad : IDisposable
     {
         if (report.Length < 60) return;
         long stamp = System.Diagnostics.Stopwatch.GetTimestamp();
+        InputCapture.Post(Number, kind, stamp, report);
         (ulong Address, int Mv, bool Charging)? sample = null;
         lock (_gate)
         {
             if (_link.TryGetValue(kind, out var link)) link.Report(stamp);
+            _lastReport[kind] = Environment.TickCount64;
             _seen.TryGetValue(kind, out var seen);
             // 0x1F: battery voltage in mV; 0x21: charging state, non-zero on USB power
             // (switch2_controller_research, hid_reports.md, input report 0x05).
@@ -294,6 +408,7 @@ sealed class VirtualPad : IDisposable
                 Log.Info($"Player {Number} {kind}: battery {BitConverter.ToUInt16(report, BatteryAt)} mV, " +
                     $"charging state 0x{report[BatteryAt + 2]:X2}.");
             if (kind == ControllerKind.ProController) report.AsSpan(0, Math.Min(report.Length, ReportLength)).CopyTo(_merged);
+            else if (IsSideways) SidewaysJoyCon.Apply(kind, report).CopyTo(_merged, 0);
             else
             {
                 Merge(_merged, kind, report, _right != null);
@@ -329,10 +444,14 @@ sealed class VirtualPad : IDisposable
     {
         if (millivolts <= 0) return;
         BatteryLog.Record(address, millivolts, charging);
-        bool low = !charging && BatteryLog.IsLow(address, millivolts);
         string? warn = null;
         lock (_gate)
         {
+            // The controller's own level when it gives one, otherwise voltage.
+            var power = _power.GetValueOrDefault(kind);
+            bool low = power != null
+                ? power.Level <= LowLevel && !power.Charging && !power.ExternalPower
+                : !charging && BatteryLog.IsLow(address, millivolts);
             // Two low samples in a row, so a dip under heavy rumble doesn't trigger it.
             int count = low ? _lowSamples.GetValueOrDefault(kind) + 1 : 0;
             _lowSamples[kind] = count;
@@ -345,7 +464,8 @@ sealed class VirtualPad : IDisposable
                     _ => "Pro Controller 2",
                 };
                 var pct = BatteryLog.Percent(address, millivolts);
-                warn = $"{name} (player {Number}) battery is low{(pct is int p ? $" (~{p}%)" : "")}. Charge it soon.";
+                var detail = power != null ? $" (level {power.Level} of {PowerInfo.MaxLevel})" : pct is int p ? $" (~{p}%)" : "";
+                warn = $"{name} (player {Number}) battery is low{detail}. Charge it soon.";
             }
         }
         if (warn != null)
@@ -405,10 +525,42 @@ sealed class VirtualPad : IDisposable
         return report;
     }
 
+    int _isolationHolds;
+
+    /// <summary>True while Steam and games must not see this pad's input: a Test inputs
+    /// window is open, or it's being recorded.</summary>
+    public bool IsIsolated => Volatile.Read(ref _isolationHolds) > 0 || InputCapture.RecordingPlayer == Number;
+
+    /// <summary>Keeps input from Steam until the returned object is disposed.</summary>
+    public IDisposable HoldIsolation()
+    {
+        Interlocked.Increment(ref _isolationHolds);
+        return new IsolationHold(this);
+    }
+
+    sealed class IsolationHold(VirtualPad pad) : IDisposable
+    {
+        int _released;
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0) Interlocked.Decrement(ref pad._isolationHolds);
+        }
+    }
+
+    /// <summary>What Steam sees during isolation: nothing pressed, sticks centred, no motion,
+    /// and the real battery, so it doesn't look like the charge changed.</summary>
+    internal static byte[] IsolatedReport(byte[] merged)
+    {
+        var report = NeutralReport();
+        merged.AsSpan(BatteryAt, 4).CopyTo(report.AsSpan(BatteryAt));
+        return report;
+    }
+
     void Submit()
     {
         Span<byte> state = stackalloc byte[StateBlockSize];
-        lock (_gate) ToStateBlock(_merged, state);
+        bool isolated = IsIsolated;
+        lock (_gate) ToStateBlock(isolated ? IsolatedReport(_merged) : _merged, state);
         try { _pad.SubmitRawReport(state); }
         catch (ObjectDisposedException) { }
     }

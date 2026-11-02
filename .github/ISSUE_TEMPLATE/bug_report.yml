@@ -1,0 +1,20 @@
+name: Bug report
+description: Something isn't working with the bridge
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead. For input problems, say whether it lights up in Test inputs.
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game, if it only happens in one
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics report
+      description: In the bridge, open Settings and click Create diagnostics report. Look through the zip, then attach it here. Addresses and your Windows user name are removed, but check it before posting.

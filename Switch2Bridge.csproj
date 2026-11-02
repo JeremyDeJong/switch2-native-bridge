@@ -6,7 +6,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <!-- ThemeMode (WPF's Windows 11 Fluent theme) is marked experimental. -->
     <NoWarn>$(NoWarn);WPF0001</NoWarn>
-    <Version>0.6.0</Version>
+    <Version>0.8.0</Version>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PlatformTarget>x64</PlatformTarget>
@@ -34,6 +34,7 @@
       <HintPath>lib\HIDMaestro.Core.dll</HintPath>
     </Reference>
     <EmbeddedResource Include="switch2-pro-composite.json" LogicalName="switch2-pro-composite.json" />
+    <EmbeddedResource Include="firmware-support.json" LogicalName="firmware-support.json" />
     <EmbeddedResource Include="assets\app.ico" LogicalName="app.ico" />
     <!-- Also as a WPF resource, for the windows' title-bar icon. -->
     <Resource Include="assets\app.ico" />

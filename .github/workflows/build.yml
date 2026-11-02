@@ -1,0 +1,57 @@
+name: Build
+
+# Every push and pull request runs the self-test and recording replays. Pushing a tag
+# like v0.7.0 also publishes a GitHub Release with the exe and its .sha256 file, which
+# is what the app's updater looks for.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Check the tag matches the project version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = ([xml](Get-Content Switch2Bridge.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+          if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME doesn't match project version $version." }
+
+      - name: Build, self-test and replay recordings
+        shell: pwsh
+        run: ./tools/build.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Switch2Bridge
+          path: artifacts/release/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Switch2Bridge
+          path: release
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME (Get-ChildItem release).FullName --repo $env:GITHUB_REPOSITORY --title $env:GITHUB_REF_NAME --generate-notes

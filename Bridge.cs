@@ -45,7 +45,40 @@ sealed class Bridge : IDisposable
     {
         _watcher.Start();
         _ = Task.Run(IdleLoop);
+        _ = Task.Run(HealthLoop);
         Log.Info("Press a button on a paired controller, or hold Sync on a new one to pair it.");
+    }
+
+    /// <summary>Once a second: restarts the advertisement watcher if Windows stopped it (sleep,
+    /// Bluetooth toggled), ends sessions whose reports have stopped so the controller can
+    /// reconnect, and passes on player lights Steam has set.</summary>
+    async Task HealthLoop()
+    {
+        var staleAfter = TimeSpan.FromSeconds(5);
+        while (!_ct.IsCancellationRequested)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(1), _ct); }
+            catch (OperationCanceledException) { return; }
+            try
+            {
+                if (_watcher.Status is BluetoothLEAdvertisementWatcherStatus.Stopped or BluetoothLEAdvertisementWatcherStatus.Aborted)
+                {
+                    _watcher.Start();
+                    Log.Info("Restarted listening for controllers.");
+                }
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                Log.Warn($"Couldn't restart listening for controllers: {e.Message}");
+            }
+            VirtualPad[] pads;
+            lock (_gate) pads = [.. _pads];
+            foreach (var pad in pads)
+            {
+                pad.EndStaleSessions(staleAfter);
+                await pad.SyncPlayerLightsAsync(_ct);
+            }
+        }
     }
 
     /// <summary>Turns off controllers left without input for the configured time.</summary>
@@ -74,6 +107,20 @@ sealed class Bridge : IDisposable
         lock (_gate) pads = [.. _pads];
         var all = Task.WhenAll(pads.Where(p => p.IsLive).Select(p => p.PowerOffAsync(reason)));
         await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(4)));
+    }
+
+    /// <summary>Runs the audio probe on the first connected Pro Controller; null if none is connected.</summary>
+    public async Task<string?> RunAudioProbeAsync(IProgress<string> progress)
+    {
+        SwitchController? controller;
+        lock (_gate) controller = _pads.Select(p => p.LivePro).FirstOrDefault(c => c != null);
+        return controller == null ? null : await AudioProbe.RunAsync(controller, progress, _ct);
+    }
+
+    /// <summary>Keeps a player's input from Steam until disposed; null if there's no such player.</summary>
+    public IDisposable? HoldIsolation(int player)
+    {
+        lock (_gate) return _pads.FirstOrDefault(p => p.Number == player)?.HoldIsolation();
     }
 
     public Task TestRumbleAsync(int player)
@@ -141,6 +188,7 @@ sealed class Bridge : IDisposable
     {
         SwitchController controller;
         FlashDump? flash;
+        var started = System.Diagnostics.Stopwatch.StartNew();
 
         // One connection set-up at a time: Windows' LE stack copes poorly with
         // several GATT discoveries racing each other.
@@ -178,12 +226,20 @@ sealed class Bridge : IDisposable
         try
         {
             await controller.StartInputAsync(_ct);
-            await controller.SetPlayerLedsAsync(pad.LedPattern, _ct);
-            Log.Ok($"{controller.Name} connected as player {pad.Number}.");
+            await controller.SetPlayerLedsAsync(pad.CurrentLights, _ct);
+            Log.Ok($"{controller.Name} connected as player {pad.Number} in {started.ElapsedMilliseconds} ms.");
+            pad.SetFirmware(controller.Kind, await controller.ReadFirmwareAsync(_ct), controller.HasHeadsetChannel);
             _ = controller.RequestFastLinkAsync(_ct).ContinueWith(_ => { }, TaskScheduler.Default);
             Changed?.Invoke($"{controller.Name} connected (player {pad.Number})");
 
-            await disconnected.Task.WaitAsync(_ct);
+            using var session = CancellationTokenSource.CreateLinkedTokenSource(_ct);
+            var powerPolling = PollPowerAsync(controller, pad, session.Token);
+            try { await disconnected.Task.WaitAsync(_ct); }
+            finally
+            {
+                session.Cancel();
+                await powerPolling;
+            }
             if (controller.PoweredOff)
             {
                 lock (_gate) _quietUntil[address] = Environment.TickCount64 + (long)QuietAfterPowerOff.TotalMilliseconds;
@@ -199,6 +255,21 @@ sealed class Bridge : IDisposable
         {
             pad.Detach(controller);
         }
+    }
+
+    /// <summary>Refreshes a controller's battery level every 30 seconds while it's connected.</summary>
+    static async Task PollPowerAsync(SwitchController controller, VirtualPad pad, CancellationToken ct)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(3), ct);
+            while (true)
+            {
+                if (await controller.ReadPowerAsync(ct) is { } power) pad.SetPower(controller.Kind, power);
+                await Task.Delay(TimeSpan.FromSeconds(30), ct);
+            }
+        }
+        catch (OperationCanceledException) { }
     }
 
     async Task<FlashDump?> ReadFlash(SwitchController controller)
@@ -234,13 +305,18 @@ sealed class Bridge : IDisposable
             {
                 pad = _pads.FirstOrDefault(p => p.Owns(controller.Address) && p.HasRoomFor(controller.Kind, controller.Address))
                     ?? (controller.Kind == ControllerKind.ProController ? null
-                        : _pads.FirstOrDefault(p => p.HasRoomFor(controller.Kind, controller.Address) && !p.Owns(controller.Address)
+                        : _pads.FirstOrDefault(p => !p.Sideways && p.HasRoomFor(controller.Kind, controller.Address) && !p.Owns(controller.Address)
                             && (controller.Kind == ControllerKind.JoyConLeft ? p.LeftAddress == null : p.RightAddress == null)));
             }
             if (pad != null) return pad;
 
             if (controller.Kind == ControllerKind.ProController)
                 return NewPad(isJoyConPad: false, flash, null, null, controller.Address);
+
+            // Set to play sideways: its own controller, with no waiting for a partner. Its stick
+            // becomes the left stick, so its calibration goes in the first slot whichever side it is.
+            if (Settings.ControllerSideways(controller.Address))
+                return NewPad(isJoyConPad: true, null, flash, null, controller.Address);
 
             var partnerKind = controller.Kind == ControllerKind.JoyConLeft ? ControllerKind.JoyConRight : ControllerKind.JoyConLeft;
             int partnerIndex = _waiting.FindIndex(w => w.Controller.Kind == partnerKind);
@@ -287,15 +363,40 @@ sealed class Bridge : IDisposable
     {
         int number;
         lock (_gate)
-        {
-            number = 1;
-            while (_pads.Any(p => p.Number == number)) number++;
-        }
+            number = ChoosePlayer(Settings.ControllerPlayer(identityAddress), _pads.Select(p => p.Number).ToHashSet(),
+                Settings.PlayersReservedByOthers(identityAddress));
+        Settings.RememberPlayer(identityAddress, number);
         Log.Info($"Creating virtual wired Pro Controller 2 for player {number}...");
         var pad = VirtualPad.Create(_ctx, number, isJoyConPad, pro, left, right, $"switch2bridge-{identityAddress:X12}",
-            message => Changed?.Invoke(message));
+            message => Changed?.Invoke(message), identityAddress);
         lock (_gate) _pads.Add(pad);
         return pad;
+    }
+
+    /// <summary>A controller's remembered player if free; otherwise the lowest number that's
+    /// free and not remembered by another controller; otherwise the lowest free one.</summary>
+    internal static int ChoosePlayer(int? remembered, IReadOnlySet<int> inUse, IReadOnlySet<int> reserved)
+    {
+        if (remembered is int player && !inUse.Contains(player)) return player;
+        for (int n = 1; n <= 8; n++)
+            if (!inUse.Contains(n) && !reserved.Contains(n)) return n;
+        int free = 1;
+        while (inUse.Contains(free)) free++;
+        return free;
+    }
+
+    public void SetSideways(int player, bool sideways)
+    {
+        VirtualPad? pad;
+        lock (_gate) pad = _pads.FirstOrDefault(p => p.Number == player);
+        pad?.SetSideways(sideways);
+    }
+
+    public void RenamePlayer(int player, string name)
+    {
+        VirtualPad? pad;
+        lock (_gate) pad = _pads.FirstOrDefault(p => p.Number == player);
+        if (pad != null) Settings.SetControllerName(pad.IdentityAddress, name);
     }
 
     public void Dispose()

@@ -26,6 +26,8 @@ static class Preview
                     Render(app, Samples, Path.Combine(folder, $"status-{name}.png"));
                     Render(app, () => [], Path.Combine(folder, $"status-empty-{name}.png"));
                     Render(app, () => [Samples()[0]], Path.Combine(folder, $"status-settings-{name}.png"), extras: true);
+                    var pressed = Samples()[0] with { Buttons = 0x08 | 0x02000000 };
+                    Capture(app, new InputTestWindow(() => pressed, 1, joyCons: false), Path.Combine(folder, $"test-inputs-{name}.png"));
                 }
             }
             catch (Exception e)
@@ -41,11 +43,23 @@ static class Preview
 
     static PadStatus[] Samples() =>
     [
-        new(1, "Pro Controller 2", [new SideStatus("Pro", true, 3310, false, 68, 72, 14.7, 31, 0)], 0.5, 0.5, 0.7, 0.35, [0.3, 0.6, 0.15], true),
+        new(1, "Pro Controller 2", [new SideStatus("Pro", true, 3310, false, 68, 72, 14.7, 31, 0, 6, new FirmwareInfo(new Version(2, 0, 0), 2, new Version(12, 0, 0), new Version(1, 0, 0)), true)], 0.5, 0.5, 0.7, 0.35, [0.3, 0.6, 0.15], true, CustomName: "Couch controller"),
         new(2, "Joy-Con pair", [new SideStatus("L", true, 3180, false, 67, null, 14.9, 46, 1), new SideStatus("R", true, 3102, true, 66, null, 15.1, 62, 2)],
             0.4, 0.6, 0.5, 0.5, [0.45, 0.2, 0.5], false),
-        new(3, "Pro Controller 2", [new SideStatus("Pro", false, null, false, 0)], 0.5, 0.5, 0.5, 0.5, [0, 0, 0], false),
+        new(3, "Joy-Con (R)", [new SideStatus("R", true, 3420, false, 66, null, 15.0, 28, 0, 8, new FirmwareInfo(new Version(1, 2, 0), 1, new Version(12, 0, 0), null))],
+            0.6, 0.5, 0.5, 0.5, [0.1, 0.2, 0.1], false, CanHoldSideways: true, Sideways: true),
+        new(4, "Pro Controller 2", [new SideStatus("Pro", false, null, false, 0)], 0.5, 0.5, 0.5, 0.5, [0, 0, 0], false),
     ];
+
+    static void Capture(App app, Window window, string file)
+    {
+        window.WindowStartupLocation = WindowStartupLocation.Manual;
+        window.Left = -10000; window.Top = -10000;
+        window.ShowActivated = false; window.ShowInTaskbar = false;
+        window.Show();
+        window.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+        Save(app, window, file);
+    }
 
     static void Render(App app, Func<PadStatus[]> players, string file, bool extras = false)
     {
@@ -59,6 +73,7 @@ static class Preview
             // The update banner and the open Settings section, at a height that fits them.
             window.ShowUpdateBannerForPreview("0.7.0");
             window.SettingsExpander.IsExpanded = true;
+            window.ShowWarningsForPreview(["Steam isn't running. Open it to use your controllers in games."]);
             window.Height = 1000;
         }
         window.Show();
@@ -72,6 +87,11 @@ static class Preview
             wait.Start();
             Dispatcher.PushFrame(frame);
         }
+        Save(app, window, file);
+    }
+
+    static void Save(App app, Window window, string file)
+    {
         var root = (FrameworkElement)window.Content;
         root.UpdateLayout();
         double scale = 1.5;

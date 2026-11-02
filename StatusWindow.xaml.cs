@@ -8,7 +8,8 @@ using System.Windows.Threading;
 namespace Switch2Bridge;
 
 sealed record SideStatus(string Name, bool Live, int? BatteryMv, bool Charging, int ReportsPerSecond,
-    int? BatteryPercent = null, double AvgGapMs = 0, double WorstGapMs = 0, int StallsPerMinute = 0)
+    int? BatteryPercent = null, double AvgGapMs = 0, double WorstGapMs = 0, int StallsPerMinute = 0, int? PowerLevel = null,
+    FirmwareInfo? Firmware = null, bool HeadsetChannel = false, bool FirmwareTested = false)
 {
     /// <summary>Nintendo's own voltage-to-level curve isn't public; these are the thresholds
     /// switch2controllerpc's authors settled on from real controllers.</summary>
@@ -22,7 +23,11 @@ sealed record SideStatus(string Name, bool Live, int? BatteryMv, bool Charging, 
 }
 
 sealed record PadStatus(int Number, string Name, IReadOnlyList<SideStatus> Sides,
-    double LX, double LY, double RX, double RY, double[] Gyro, bool Rumbling);
+    double LX, double LY, double RX, double RY, double[] Gyro, bool Rumbling, uint Buttons = 0, bool Isolated = false, string? CustomName = null,
+    bool CanHoldSideways = false, bool Sideways = false)
+{
+    public string DisplayName => CustomName ?? Name;
+}
 
 /// <summary>The status window: one card per player, an update banner, and settings.</summary>
 public partial class StatusWindow : Window
@@ -35,6 +40,7 @@ public partial class StatusWindow : Window
     readonly ObservableCollection<PadView> _pads = [];
     readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(66) };
     bool _loadingSettings;
+    IReadOnlyList<string>? _shownWarnings;
 
     /// <param name="preview">Sample players to show instead of the bridge's (for --render-preview).</param>
     internal StatusWindow(App app, Func<PadStatus[]>? preview = null)
@@ -74,6 +80,7 @@ public partial class StatusWindow : Window
         SleepBox.IsChecked = s.OffOnSleep;
         QuitBox.IsChecked = s.OffOnQuit;
         UpdatesBox.IsChecked = s.CheckForUpdates;
+        LogInputsBox.IsChecked = s.LogInputs;
         VersionText.Text = $"Version {Updater.Current.ToString(3)}";
         _loadingSettings = false;
     }
@@ -94,6 +101,13 @@ public partial class StatusWindow : Window
             : live == 0 ? "Listening for controllers."
             : $"{live} connected. Steam sees each one as a wired Switch 2 Pro Controller.";
         EmptyHint.Visibility = snapshot.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        if (_preview == null && !ReferenceEquals(_shownWarnings, _app.SetupWarnings))
+        {
+            _shownWarnings = _app.SetupWarnings;
+            Checks.ItemsSource = _shownWarnings;
+            Checks.Visibility = _shownWarnings.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
     }
 
     void OnUpdateChanged()
@@ -115,7 +129,7 @@ public partial class StatusWindow : Window
         UpdateButton.IsEnabled = SkipButton.IsEnabled = false;
         var progress = new Progress<string>(text =>
         {
-            UpdateStatus.Text = text.Length > 0 ? text : "Your controllers stay connected while it updates.";
+            UpdateStatus.Text = text.Length > 0 ? text : "Your controllers reconnect after it restarts.";
             if (text.Length == 0) UpdateButton.IsEnabled = SkipButton.IsEnabled = true;
         });
         await _app.InstallUpdateAsync(progress);
@@ -135,6 +149,92 @@ public partial class StatusWindow : Window
         button.IsEnabled = false;
         try { await _app.Bridge.TestRumbleAsync(player); }
         finally { button.IsEnabled = true; }
+    }
+
+    void OnSidewaysClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is CheckBox { Tag: int player } box) _app.Bridge?.SetSideways(player, box.IsChecked == true);
+    }
+
+    void OnRename(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: int player } || _app.Bridge is not { } bridge) return;
+        var current = bridge.Snapshot().FirstOrDefault(p => p.Number == player);
+        var dialog = new RenameWindow(current?.CustomName ?? "") { Owner = this };
+        if (dialog.ShowDialog() == true && dialog.Result != null) bridge.RenamePlayer(player, dialog.Result);
+    }
+
+    async void OnCreateDiagnostics(object sender, RoutedEventArgs e)
+    {
+        var button = (Button)sender;
+        button.IsEnabled = false;
+        try
+        {
+            var adapter = await SetupChecks.DescribeAdapterAsync();
+            var pads = _app.Bridge?.Snapshot() ?? [];
+            var warnings = _app.SetupWarnings;
+            bool autostart = _app.AutostartEnabled;
+            var path = await Task.Run(() => Diagnostics.Create(pads, warnings, adapter, autostart));
+            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = true });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log.Warn($"Could not create the diagnostics report: {ex.Message}");
+            MessageBox.Show($"Couldn't create the report:\n\n{ex.Message}", "Switch 2 Native Bridge", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally { button.IsEnabled = true; }
+    }
+
+    internal void ShowWarningsForPreview(IReadOnlyList<string> warnings)
+    {
+        _shownWarnings = warnings;
+        Checks.ItemsSource = warnings;
+        Checks.Visibility = Visibility.Visible;
+    }
+
+    void OnTestInputs(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: int player } || _app.Bridge is not { } bridge) return;
+        var status = bridge.Snapshot().FirstOrDefault(p => p.Number == player);
+        bool joyCons = status?.Name.StartsWith("Joy-Con") == true;
+        var hold = bridge.HoldIsolation(player);
+        var window = new InputTestWindow(() => bridge.Snapshot().FirstOrDefault(p => p.Number == player), player, joyCons,
+            status?.Sideways == true, status?.Name == "Joy-Con (R)") { Owner = this };
+        window.Closed += (_, _) => hold?.Dispose();
+        window.Show();
+    }
+
+    void OnRecord(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: int player }) return;
+        try
+        {
+            if (InputCapture.IsRecording(player)) InputCapture.StopRecording();
+            else InputCapture.StartRecording(player);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log.Warn($"Could not start recording: {ex.Message}");
+            MessageBox.Show($"Couldn't start recording:\n\n{ex.Message}", "Switch 2 Native Bridge", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    void OnLogInputsClick(object sender, RoutedEventArgs e)
+    {
+        Settings.Current.LogInputs = LogInputsBox.IsChecked == true;
+        Settings.Save();
+    }
+
+    void OnOpenInputLogs(object sender, RoutedEventArgs e)
+    {
+        Directory.CreateDirectory(InputCapture.LogDirectory);
+        Process.Start(new ProcessStartInfo("explorer.exe", InputCapture.LogDirectory) { UseShellExecute = true });
+    }
+
+    void OnOpenRecordings(object sender, RoutedEventArgs e)
+    {
+        Directory.CreateDirectory(InputCapture.RecordingDirectory);
+        Process.Start(new ProcessStartInfo("explorer.exe", InputCapture.RecordingDirectory) { UseShellExecute = true });
     }
 
     void OnRumbleChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -174,6 +274,43 @@ public partial class StatusWindow : Window
         if (_app.AvailableUpdate == null) VersionText.Text = $"Version {Updater.Current.ToString(3)}, up to date";
     }
 
+    async void OnRunProbe(object sender, RoutedEventArgs e)
+    {
+        if (_app.Bridge is not { } bridge)
+        {
+            ProbeStatus.Text = "The bridge is still starting.";
+            return;
+        }
+        ProbeButton.IsEnabled = false;
+        try
+        {
+            var progress = new Progress<string>(text => ProbeStatus.Text = text);
+            var verdict = await bridge.RunAudioProbeAsync(progress);
+            ProbeStatus.Text = verdict ?? "Connect a Pro Controller first. Joy-Cons don't have a headphone jack.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.Warn($"Audio probe failed: {ex.Message}");
+            ProbeStatus.Text = $"The test didn't finish: {ex.Message}";
+        }
+        finally
+        {
+            ProbeButton.IsEnabled = true;
+        }
+    }
+
+    void OnOpenProbeResults(object sender, RoutedEventArgs e)
+    {
+        Directory.CreateDirectory(AudioProbe.Directory);
+        Process.Start(new ProcessStartInfo("explorer.exe", AudioProbe.Directory) { UseShellExecute = true });
+    }
+
+    void OnOpenFirmwareRecord(object sender, RoutedEventArgs e)
+    {
+        Directory.CreateDirectory(Log.Directory);
+        Process.Start(new ProcessStartInfo("explorer.exe", Log.Directory) { UseShellExecute = true });
+    }
+
     void OnOpenBatteryLogs(object sender, RoutedEventArgs e)
     {
         Directory.CreateDirectory(BatteryLog.Directory);
@@ -205,17 +342,22 @@ sealed class PadView : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 
     int _number;
-    string _title = "", _detail = "", _linkDetail = "";
+    string _title = "", _detail = "", _linkDetail = "", _firmwareDetail = "", _recordLabel = "Record";
     double _cardOpacity = 1, _lx, _ly, _rx, _ry, _gx, _gy, _gz;
-    Visibility _liveVisibility, _actionsVisibility;
+    Visibility _liveVisibility, _actionsVisibility, _sidewaysVisibility = Visibility.Collapsed;
+    bool _sideways;
 
     public int Number => _number;
     public string Title => _title;
     public string Detail => _detail;
     public string LinkDetail => _linkDetail;
+    public string FirmwareDetail => _firmwareDetail;
+    public string RecordLabel => _recordLabel;
     public double CardOpacity => _cardOpacity;
     public Visibility LiveVisibility => _liveVisibility;
     public Visibility ActionsVisibility => _actionsVisibility;
+    public Visibility SidewaysVisibility => _sidewaysVisibility;
+    public bool IsSideways => _sideways;
     public double LX => _lx;
     public double LY => _ly;
     public double RX => _rx;
@@ -228,9 +370,13 @@ sealed class PadView : INotifyPropertyChanged
     {
         bool live = s.Sides.Any(x => x.Live);
         Set(ref _number, s.Number, nameof(Number));
-        Set(ref _title, $"Player {s.Number} · {s.Name}", nameof(Title));
+        Set(ref _title, $"Player {s.Number} · {s.DisplayName}", nameof(Title));
         Set(ref _detail, Describe(s, live), nameof(Detail));
         Set(ref _linkDetail, DescribeLink(s), nameof(LinkDetail));
+        Set(ref _firmwareDetail, DescribeFirmware(s), nameof(FirmwareDetail));
+        Set(ref _recordLabel, InputCapture.IsRecording(s.Number) ? "Stop recording" : "Record", nameof(RecordLabel));
+        Set(ref _sidewaysVisibility, s.CanHoldSideways && live ? Visibility.Visible : Visibility.Collapsed, nameof(SidewaysVisibility));
+        Set(ref _sideways, s.Sideways, nameof(IsSideways));
         Set(ref _cardOpacity, live ? 1.0 : 0.6, nameof(CardOpacity));
         Set(ref _liveVisibility, live ? Visibility.Visible : Visibility.Hidden, nameof(LiveVisibility));
         Set(ref _actionsVisibility, live ? Visibility.Visible : Visibility.Collapsed, nameof(ActionsVisibility));
@@ -247,17 +393,37 @@ sealed class PadView : INotifyPropertyChanged
     {
         if (!live) return "Off or out of range. Press a button on it to reconnect.";
         var parts = new List<string>();
+        if (s.Isolated) parts.Add("Steam input paused");
         foreach (var side in s.Sides)
         {
             var prefix = s.Sides.Count > 1 ? side.Name + " " : "Battery ";
             if (!side.Live) parts.Add($"{side.Name} not connected");
             else if (side.BatteryMv is int mv)
             {
-                var level = side.BatteryPercent is int pct ? $"~{pct}%" : side.BatteryLevel;
+                var level = side.PowerLevel is int bars ? $"level {bars} of {PowerInfo.MaxLevel}"
+                    : side.BatteryPercent is int pct ? $"~{pct}%" : side.BatteryLevel;
                 parts.Add($"{prefix}{level} ({mv / 1000.0:0.00} V{(side.Charging ? ", charging" : "")})");
             }
         }
         if (s.Rumbling) parts.Add("Rumble");
+        return string.Join(" · ", parts);
+    }
+
+    /// <summary>The firmware line: version and whether it's on the tested list, plus for a
+    /// Pro Controller whether it exposes the headset audio channel.</summary>
+    internal static string DescribeFirmware(PadStatus s)
+    {
+        var sides = s.Sides.Where(x => x.Live).ToList();
+        if (sides.Count == 0) return "";
+        var parts = sides.Select(side =>
+        {
+            var prefix = s.Sides.Count > 1 ? $"{side.Name} firmware" : "Firmware";
+            return side.Firmware is { } f
+                ? $"{prefix} {f.Firmware} ({(side.FirmwareTested ? "tested" : "not yet tested")})"
+                : $"{prefix} unknown";
+        }).ToList();
+        if (s.Sides.Count == 1 && sides[0].Firmware != null && s.Name == "Pro Controller 2")
+            parts.Add($"Headset audio channel: {(sides[0].HeadsetChannel ? "yes" : "no")}");
         return string.Join(" · ", parts);
     }
 

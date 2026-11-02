@@ -1,10 +1,27 @@
 using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
+using Windows.Foundation;
 
 namespace Switch2Bridge;
 
 enum ControllerKind { ProController, JoyConLeft, JoyConRight }
+
+/// <summary>The Power Info byte at offset 1 of input reports 0x07/0x08/0x09: bit 0 external
+/// power, bit 1 charging, bits 2-5 battery level 0-9 (switch2_controller_research, hid_reports.md).</summary>
+sealed record PowerInfo(int Level, bool ExternalPower, bool Charging)
+{
+    public const int MaxLevel = 9;
+
+    /// <summary>Null for a report too short to hold the byte, one that is all zeros
+    /// (nothing has been generated yet), or a level outside the documented range.</summary>
+    internal static PowerInfo? Parse(ReadOnlySpan<byte> report)
+    {
+        if (report.Length < 2 || !report.ContainsAnyExcept((byte)0)) return null;
+        int level = (report[1] >> 2) & 0xF;
+        return level > MaxLevel ? null : new PowerInfo(level, (report[1] & 1) != 0, (report[1] & 2) != 0);
+    }
+}
 
 /// <summary>
 /// A Switch 2 Pro Controller or Joy-Con connected over Bluetooth LE. Talks the
@@ -32,6 +49,10 @@ sealed class SwitchController : IAsyncDisposable
     static readonly Guid VibrationJoyConRightUuid = Guid.Parse("fa19b0fb-cd1f-46a7-84a1-bbb09e00c149");
     static readonly Guid CommandWriteUuid = Guid.Parse("649d4ac9-8eb7-4e6c-af44-1ea54fe5f005");
     static readonly Guid CommandResponseUuid = Guid.Parse("c765a961-d9d8-4d36-a20a-5315b111836a");
+    static readonly Guid HeadsetInputUuid = Guid.Parse("7492866c-ec3e-4619-8258-32755ffcc0f9");
+    static readonly Guid PowerReportProUuid = Guid.Parse("7492866c-ec3e-4619-8258-32755ffcc0f8");
+    static readonly Guid PowerReportJoyConLeftUuid = Guid.Parse("cc1bbbb5-7354-4d32-a716-a81cb241a32a");
+    static readonly Guid PowerReportJoyConRightUuid = Guid.Parse("d5a9e01e-2ffc-4cca-b20c-8b67142bf442");
 
     const byte CmdMemory = 0x02, SubMemoryRead = 0x04;
     const byte CmdLeds = 0x09, SubLedsSetPlayer = 0x07;
@@ -86,6 +107,11 @@ sealed class SwitchController : IAsyncDisposable
         if (Interlocked.Exchange(ref _disconnected, 1) == 0) Disconnected?.Invoke();
     }
 
+    static readonly HashSet<ulong> DiscoveredThisRun = [];
+
+    /// <summary>Ends this session, as when the link looks alive to Windows but reports have stopped.</summary>
+    public void EndSession() => RaiseDisconnected();
+
     /// <summary>Connects, finds the GATT characteristics and reads which controller this is.</summary>
     public static async Task<SwitchController> ConnectAsync(ulong address, CancellationToken ct)
     {
@@ -97,14 +123,20 @@ sealed class SwitchController : IAsyncDisposable
         var session = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId).AsTask(ct);
         session.MaintainConnection = true;
 
-        GattCharacteristic? input = null, cmdWrite = null, cmdResponse = null;
+        GattCharacteristic? input = null, cmdWrite = null, cmdResponse = null, headset = null;
         var vibration = new Dictionary<Guid, GattCharacteristic>();
+        var powerReports = new Dictionary<Guid, GattCharacteristic>();
         var problems = new List<string>();
+        bool knownThisRun;
+        lock (DiscoveredThisRun) knownThisRun = DiscoveredThisRun.Contains(address);
         for (int attempt = 1; attempt <= 3 && (input == null || cmdWrite == null || cmdResponse == null); attempt++)
         {
             if (attempt > 1) await Task.Delay(1000, ct);
             problems.Clear();
-            var services = await device.GetGattServicesAsync(BluetoothCacheMode.Uncached).AsTask(ct);
+            // A full discovery takes seconds. A controller already read since the bridge started
+            // reconnects from Windows' cache; a fresh start reads it anew, as firmware may have changed.
+            var mode = knownThisRun && attempt == 1 ? BluetoothCacheMode.Cached : BluetoothCacheMode.Uncached;
+            var services = await device.GetGattServicesAsync(mode).AsTask(ct);
             if (services.Status != GattCommunicationStatus.Success)
             {
                 problems.Add($"service discovery: {services.Status}");
@@ -113,7 +145,7 @@ sealed class SwitchController : IAsyncDisposable
             }
             foreach (var service in services.Services)
             {
-                var chars = await service.GetCharacteristicsAsync(BluetoothCacheMode.Uncached).AsTask(ct);
+                var chars = await service.GetCharacteristicsAsync(mode).AsTask(ct);
                 if (chars.Status != GattCommunicationStatus.Success)
                 {
                     // AccessDenied here usually means another app holds the controller.
@@ -125,6 +157,9 @@ sealed class SwitchController : IAsyncDisposable
                     if (c.Uuid == InputReportUuid) input = c;
                     else if (c.Uuid == CommandWriteUuid) cmdWrite = c;
                     else if (c.Uuid == CommandResponseUuid) cmdResponse = c;
+                    else if (c.Uuid == HeadsetInputUuid) headset = c;
+                    else if (c.Uuid == PowerReportProUuid || c.Uuid == PowerReportJoyConLeftUuid || c.Uuid == PowerReportJoyConRightUuid)
+                        powerReports[c.Uuid] = c;
                     else if (c.Uuid == VibrationProUuid || c.Uuid == VibrationJoyConLeftUuid || c.Uuid == VibrationJoyConRightUuid)
                         vibration[c.Uuid] = c;
                 }
@@ -141,7 +176,8 @@ sealed class SwitchController : IAsyncDisposable
                 $"Could not read the controller's Bluetooth services{detail}. If another controller app (or an older copy of this bridge) is running, close it and press a button on the controller.");
         }
 
-        var controller = new SwitchController(device, session, input, cmdWrite, cmdResponse, vibration);
+        lock (DiscoveredThisRun) DiscoveredThisRun.Add(address);
+        var controller = new SwitchController(device, session, input, cmdWrite, cmdResponse, vibration) { _headsetInput = headset, _powerReports = powerReports };
         try
         {
             cmdResponse.ValueChanged += (_, e) => controller._pendingResponse?.TrySetResult(e.CharacteristicValue.ToArray());
@@ -243,6 +279,103 @@ sealed class SwitchController : IAsyncDisposable
         await CommandAsync(CmdPair, SubPairLtk2,
             [0x00, 0x40, 0xb0, 0x8a, 0x5f, 0xcd, 0x1f, 0x9b, 0x41, 0x12, 0x5c, 0xac, 0xc6, 0x3f, 0x38, 0xa0, 0x73], ct);
         await CommandAsync(CmdPair, SubPairFinish, [0x00], ct);
+    }
+
+    GattCharacteristic? _headsetInput;
+    TypedEventHandler<GattCharacteristic, GattValueChangedEventArgs>? _headsetHandler;
+    Dictionary<Guid, GattCharacteristic> _powerReports = [];
+    long _lastPowerListen;
+    bool _powerProblemLogged, _powerMethodLogged;
+    static readonly TimeSpan PowerListenEvery = TimeSpan.FromMinutes(5);
+
+    /// <summary>Gets the battery level without adding a constant second report stream: a single
+    /// read of this controller's input report, and if that gives nothing usable, listening to
+    /// it for about a second, at most every 5 minutes. Null when neither gives a level.</summary>
+    public async Task<PowerInfo?> ReadPowerAsync(CancellationToken ct)
+    {
+        var uuid = Kind switch
+        {
+            ControllerKind.JoyConLeft => PowerReportJoyConLeftUuid,
+            ControllerKind.JoyConRight => PowerReportJoyConRightUuid,
+            _ => PowerReportProUuid,
+        };
+        if (!_powerReports.TryGetValue(uuid, out var report)) return null;
+        try
+        {
+            var read = await report.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(3), ct);
+            if (read.Status == GattCommunicationStatus.Success && PowerInfo.Parse(read.Value.ToArray()) is { } fromRead)
+            {
+                if (!_powerMethodLogged) Log.Info($"{Name}: battery level comes from reading the report ({Convert.ToHexString(read.Value.ToArray())}).");
+                _powerMethodLogged = true;
+                return fromRead;
+            }
+
+            if (Environment.TickCount64 - _lastPowerListen < PowerListenEvery.TotalMilliseconds) return null;
+            _lastPowerListen = Environment.TickCount64;
+            var first = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TypedEventHandler<GattCharacteristic, GattValueChangedEventArgs> handler = (_, e) => first.TrySetResult(e.CharacteristicValue.ToArray());
+            report.ValueChanged += handler;
+            try
+            {
+                await report.WriteClientCharacteristicConfigurationDescriptorAsync(
+                    GattClientCharacteristicConfigurationDescriptorValue.Notify).AsTask(ct);
+                var data = await first.Task.WaitAsync(TimeSpan.FromSeconds(1.5), ct);
+                if (!_powerMethodLogged) Log.Info($"{Name}: battery level comes from listening briefly ({Convert.ToHexString(data)}).");
+                _powerMethodLogged = true;
+                return PowerInfo.Parse(data);
+            }
+            finally
+            {
+                report.ValueChanged -= handler;
+                await report.WriteClientCharacteristicConfigurationDescriptorAsync(
+                    GattClientCharacteristicConfigurationDescriptorValue.None).AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+            }
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            if (!_powerProblemLogged) Log.Warn($"{Name}: couldn't get the battery level, using voltage instead: {e.Message}");
+            _powerProblemLogged = true;
+            return null;
+        }
+    }
+
+    /// <summary>True when this controller exposes the headset audio input channel.</summary>
+    public bool HasHeadsetChannel => _headsetInput != null;
+
+    /// <summary>Reads the firmware versions (command 10/01), or null if the controller won't say.</summary>
+    public async Task<FirmwareInfo?> ReadFirmwareAsync(CancellationToken ct)
+    {
+        try { return FirmwareInfo.Parse(await CommandAsync(0x10, 0x01, [], ct)); }
+        catch (Exception e) when (e is InvalidOperationException or TimeoutException)
+        {
+            Log.Warn($"{Name}: could not read firmware version: {e.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>Subscribes to the headset audio input channel. Listening only.</summary>
+    public async Task StartHeadsetCaptureAsync(Action<byte[]> onReport, CancellationToken ct)
+    {
+        if (_headsetInput == null) throw new InvalidOperationException("No headset audio channel.");
+        _headsetHandler = (_, e) => onReport(e.CharacteristicValue.ToArray());
+        _headsetInput.ValueChanged += _headsetHandler;
+        await EnableNotify(_headsetInput, ct);
+    }
+
+    public async Task StopHeadsetCaptureAsync(Action<byte[]> _)
+    {
+        if (_headsetInput == null || _headsetHandler == null) return;
+        _headsetInput.ValueChanged -= _headsetHandler;
+        _headsetHandler = null;
+        try
+        {
+            await _headsetInput.WriteClientCharacteristicConfigurationDescriptorAsync(
+                GattClientCharacteristicConfigurationDescriptorValue.None).AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+        }
+        catch (Exception e)
+        {
+            Log.Warn($"{Name}: could not stop the headset channel: {e.Message}. Reconnect the controller if input misbehaves.");
+        }
     }
 
     public async Task StartInputAsync(CancellationToken ct)

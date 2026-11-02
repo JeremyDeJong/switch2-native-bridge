@@ -10,11 +10,17 @@ static class Program
     {
         if (args.Contains("--selftest")) return SelfTest.Run(args.SkipWhile(a => a != "--selftest").Skip(1).FirstOrDefault());
         if (args.Length == 2 && args[0] == "--render-preview") return Preview.Run(args[1]);
+        if (args.Length >= 2 && args[0] == "--check-recordings") return RecordingCheck.CheckFolder(args[1], args.Contains("--update"));
 
         // Started by the previous version's updater: let it exit and remove its exe first.
         int updatedFrom = 0;
         if (args.Length == 3 && args[0] == "--after-update" && int.TryParse(args[1], out updatedFrom))
             Updater.FinishUpdate(updatedFrom, args[2]);
+
+        // Started by a downloaded copy that just installed this one: let it exit first.
+        int installedFrom = 0;
+        if (args.Length == 2 && args[0] == "--after-install" && int.TryParse(args[1], out installedFrom))
+            Installer.WaitForExit(installedFrom);
 
         using var instance = new Mutex(true, @"Global\Switch2NativeBridge", out bool first);
         if (!first)
@@ -27,7 +33,7 @@ static class Program
         // Versions before 0.2 took no mutex, and released exes carry their version in the
         // name (Switch2Bridge-v0.6.0.exe), so look for any process named Switch2Bridge*.
         int self = Environment.ProcessId;
-        if (Process.GetProcesses().Any(p => p.Id != self && p.Id != updatedFrom
+        if (Process.GetProcesses().Any(p => p.Id != self && p.Id != updatedFrom && p.Id != installedFrom
                 && p.ProcessName.StartsWith("Switch2Bridge", StringComparison.OrdinalIgnoreCase)))
         {
             MessageBox.Show("Another copy of Switch 2 Native Bridge is running (an older version may still be open in a console window). Close it, then start the bridge again.",
@@ -35,12 +41,18 @@ static class Program
             return 1;
         }
 
+        if (args.Length == 1 && args[0] == "--uninstall") return Installer.Uninstall();
+
         if (Process.GetProcessesByName("switch2pc").Length > 0)
         {
             MessageBox.Show("switch2pc.exe is running and would grab the controllers too. Close it, then start the bridge again.",
                 "Switch 2 Native Bridge", MessageBoxButton.OK, MessageBoxImage.Warning);
             return 1;
         }
+
+        if (Installer.HandOff()) return 0;
+        Installer.RemoveOlderVersions();
+        Installer.RegisterWithWindows();
 
         Settings.Load();
         return new App(justUpdated: updatedFrom != 0).Run();

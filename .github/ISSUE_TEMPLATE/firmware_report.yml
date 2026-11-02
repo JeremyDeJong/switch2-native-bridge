@@ -1,0 +1,33 @@
+name: Firmware report
+description: Tell us a controller firmware version works, or doesn't
+labels: [firmware]
+body:
+  - type: dropdown
+    id: controller
+    attributes:
+      label: Controller
+      options: [Pro Controller 2, Joy-Con (L), Joy-Con (R)]
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware version
+      description: Shown on the controller's card in the bridge.
+      placeholder: 2.0.0
+    validations:
+      required: true
+  - type: checkboxes
+    id: working
+    attributes:
+      label: What worked?
+      options:
+        - label: All buttons and both sticks
+        - label: Gyro
+        - label: Rumble
+        - label: Battery level
+        - label: Turning off from the bridge
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything that didn't work
