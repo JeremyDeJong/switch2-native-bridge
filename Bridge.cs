@@ -112,15 +112,25 @@ sealed class Bridge : IDisposable
     /// <summary>Runs the audio probe on the first connected Pro Controller; null if none is connected.</summary>
     public async Task<string?> RunAudioProbeAsync(IProgress<string> progress)
     {
-        SwitchController? controller;
-        lock (_gate) controller = _pads.Select(p => p.LivePro).FirstOrDefault(c => c != null);
-        return controller == null ? null : await AudioProbe.RunAsync(controller, progress, _ct);
+        VirtualPad? pad;
+        lock (_gate) pad = _pads.FirstOrDefault(p => p.LivePro != null);
+        return pad == null ? null : await pad.RunAudioTestAsync(progress, _ct);
     }
 
     /// <summary>Keeps a player's input from Steam until disposed; null if there's no such player.</summary>
     public IDisposable? HoldIsolation(int player)
     {
         lock (_gate) return _pads.FirstOrDefault(p => p.Number == player)?.HoldIsolation();
+    }
+
+    /// <summary>Plays the audio test sounds on the first connected Pro Controller; null if none is connected.</summary>
+    public async Task<string?> RunAudioLabAsync(Action<AudioLab> ready, IProgress<string> progress, CancellationToken stop)
+    {
+        VirtualPad? pad;
+        lock (_gate) pad = _pads.FirstOrDefault(p => p.LivePro != null);
+        if (pad == null) return null;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(_ct, stop);
+        return await pad.RunAudioLabAsync(ready, progress, linked.Token);
     }
 
     public Task TestRumbleAsync(int player)

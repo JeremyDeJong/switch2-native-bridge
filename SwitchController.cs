@@ -50,6 +50,7 @@ sealed class SwitchController : IAsyncDisposable
     static readonly Guid CommandWriteUuid = Guid.Parse("649d4ac9-8eb7-4e6c-af44-1ea54fe5f005");
     static readonly Guid CommandResponseUuid = Guid.Parse("c765a961-d9d8-4d36-a20a-5315b111836a");
     static readonly Guid HeadsetInputUuid = Guid.Parse("7492866c-ec3e-4619-8258-32755ffcc0f9");
+    static readonly Guid HeadsetOutputUuid = Guid.Parse("cc483f51-9258-427d-a939-630c31f72b06");
     static readonly Guid PowerReportProUuid = Guid.Parse("7492866c-ec3e-4619-8258-32755ffcc0f8");
     static readonly Guid PowerReportJoyConLeftUuid = Guid.Parse("cc1bbbb5-7354-4d32-a716-a81cb241a32a");
     static readonly Guid PowerReportJoyConRightUuid = Guid.Parse("d5a9e01e-2ffc-4cca-b20c-8b67142bf442");
@@ -123,7 +124,7 @@ sealed class SwitchController : IAsyncDisposable
         var session = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId).AsTask(ct);
         session.MaintainConnection = true;
 
-        GattCharacteristic? input = null, cmdWrite = null, cmdResponse = null, headset = null;
+        GattCharacteristic? input = null, cmdWrite = null, cmdResponse = null, headset = null, headsetOutput = null;
         var vibration = new Dictionary<Guid, GattCharacteristic>();
         var powerReports = new Dictionary<Guid, GattCharacteristic>();
         var problems = new List<string>();
@@ -158,6 +159,7 @@ sealed class SwitchController : IAsyncDisposable
                     else if (c.Uuid == CommandWriteUuid) cmdWrite = c;
                     else if (c.Uuid == CommandResponseUuid) cmdResponse = c;
                     else if (c.Uuid == HeadsetInputUuid) headset = c;
+                    else if (c.Uuid == HeadsetOutputUuid) headsetOutput = c;
                     else if (c.Uuid == PowerReportProUuid || c.Uuid == PowerReportJoyConLeftUuid || c.Uuid == PowerReportJoyConRightUuid)
                         powerReports[c.Uuid] = c;
                     else if (c.Uuid == VibrationProUuid || c.Uuid == VibrationJoyConLeftUuid || c.Uuid == VibrationJoyConRightUuid)
@@ -177,7 +179,7 @@ sealed class SwitchController : IAsyncDisposable
         }
 
         lock (DiscoveredThisRun) DiscoveredThisRun.Add(address);
-        var controller = new SwitchController(device, session, input, cmdWrite, cmdResponse, vibration) { _headsetInput = headset, _powerReports = powerReports };
+        var controller = new SwitchController(device, session, input, cmdWrite, cmdResponse, vibration) { _headsetInput = headset, _headsetOutput = headsetOutput, _powerReports = powerReports };
         try
         {
             cmdResponse.ValueChanged += (_, e) => controller._pendingResponse?.TrySetResult(e.CharacteristicValue.ToArray());
@@ -286,11 +288,13 @@ sealed class SwitchController : IAsyncDisposable
     Dictionary<Guid, GattCharacteristic> _powerReports = [];
     long _lastPowerListen;
     bool _powerProblemLogged, _powerMethodLogged;
-    static readonly TimeSpan PowerListenEvery = TimeSpan.FromMinutes(5);
+    // Listening takes over the controller's one report stream, which showed as a 75 ms gap in
+    // input on firmware 2.1.4, so it's rare. Battery level changes slowly anyway.
+    static readonly TimeSpan PowerListenEvery = TimeSpan.FromMinutes(15);
 
     /// <summary>Gets the battery level without adding a constant second report stream: a single
     /// read of this controller's input report, and if that gives nothing usable, listening to
-    /// it for about a second, at most every 5 minutes. Null when neither gives a level.</summary>
+    /// it briefly, at most every 15 minutes. Null when neither gives a level.</summary>
     public async Task<PowerInfo?> ReadPowerAsync(CancellationToken ct)
     {
         var uuid = Kind switch
@@ -337,6 +341,18 @@ sealed class SwitchController : IAsyncDisposable
             _powerProblemLogged = true;
             return null;
         }
+    }
+
+    GattCharacteristic? _headsetOutput;
+
+    public bool HasHeadsetOutput => _headsetOutput != null;
+
+    /// <summary>Writes one packet to the headset audio output channel. Its format is undocumented,
+    /// so only the audio test sounds use this.</summary>
+    public async Task<GattCommunicationStatus> WriteHeadsetOutputAsync(byte[] packet)
+    {
+        if (_headsetOutput == null) throw new InvalidOperationException("No headset audio output channel.");
+        return await _headsetOutput.WriteValueAsync(packet.AsBuffer(), WriteOptionFor(_headsetOutput)).AsTask().WaitAsync(TimeSpan.FromSeconds(2));
     }
 
     /// <summary>True when this controller exposes the headset audio input channel.</summary>

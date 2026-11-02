@@ -10,7 +10,7 @@ Sections marked *Needs Joy-Cons* or similar can be skipped if you don't have the
 
 - [ ] 1.1 Quit every running copy from the tray. Check Task Manager shows no `Switch2Bridge` process.
 - [ ] 1.2 Delete the old `release-0.5` folder in the repo.
-- [ ] 1.3 Run `artifacts\release\Switch2Bridge-v0.8.0.exe` and approve the admin prompt. **Expect:** the tray icon appears, and the exe is copied to `%LOCALAPPDATA%\Programs\Switch2Bridge`.
+- [ ] 1.3 Run the newest `artifacts\release\Switch2Bridge-v*.exe` and approve the admin prompt. **Expect:** the tray icon appears, and the exe is copied to `%LOCALAPPDATA%\Programs\Switch2Bridge`.
 - [ ] 1.4 **Expect:** "Switch 2 Native Bridge" is in the Start Menu and in Windows' Installed apps.
 - [ ] 1.5 Open the status window from the tray. **Expect:** Windows 11 styling, the right version in Settings, and no setup warnings that don't apply.
 
@@ -77,8 +77,10 @@ Sections marked *Needs Joy-Cons* or similar can be skipped if you don't have the
 
 ## 10. Headset audio test (*needs a headset with a mic*)
 
-- [ ] 10.1 Plug in the headset. Settings → **Run audio test**, follow the prompts. **Expect:** a result message, with normal input unaffected. If it says listening interfered with input, restart the bridge.
+- [ ] 10.1 Plug in the headset. Settings → **Run audio test**, follow the prompts. **Expect:** about 22 seconds with the controller's input paused, a result message, and the results saying normal input came back. Check the controller works straight afterwards, and that Steam saw nothing held down.
 - [ ] 10.2 Send me the `.txt` from **Open results** (not the `.bin`, which may contain your voice). This decides whether headphone audio is worth pursuing.
+
+- [ ] 10.3 *Headphones needed, but don't wear them.* Turn the controller's volume low and hold them near your ear. Settings → **Play test sounds**, confirm. Click where you hear each sound as soon as you hear it, and **Stop** if it's unpleasant. **Expect:** under 2 minutes, then a result, and the controller works again. Send me the newest `sounds-*.txt` from **Open results**, even if you heard nothing.
 
 ## 11. Joy-Cons (*needs Joy-Cons*)
 

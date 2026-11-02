@@ -21,7 +21,8 @@ Steam only supports the Switch 2 Pro Controller over USB. On Bluetooth, the exis
 | Battery voltage reading | Confirmed |
 | Controller's own stick and motion calibration given to Steam | Built |
 | Rumble from Steam, test button and strength slider | Built |
-| Battery level 0 to 9, charging state and low-battery warning | Built |
+| Battery level 0 to 9 | Confirmed |
+| Charging state and low-battery warning | Built |
 | Real battery voltage passed to Steam | Built, but Steam may not show it |
 | Several controllers at once, each keeping its player number | Built |
 | Left + right Joy-Cons merged into one controller | Built |
@@ -33,14 +34,16 @@ Steam only supports the Switch 2 Pro Controller over USB. On Bluetooth, the exis
 | Bluetooth stats: reports per second, gaps, stalls | Confirmed reports per second; the rest is built |
 | Test inputs window, with Steam input paused while it's open | Built |
 | Input log and session recording, with recordings replayed as tests | Built |
-| Firmware version display, tested list and local history | Built |
+| Firmware version display and local history | Confirmed |
+| Tested firmware list | Built, empty so far |
 | Setup warnings and diagnostics report | Built |
 | Tray app and Windows 11 status window | Confirmed on an earlier version |
 | Start with Windows without an admin prompt | Built |
 | Install location, Start Menu entry and Windows uninstall | Built |
 | In-app updates and automatic GitHub releases | Built, waiting on a first release |
-| Headset audio test (listen only) | Built |
-| Audio through the headphone jack | **Not working**: see [Known limits](#known-limits) |
+| Headset audio test (listen only) | Confirmed with headphones, not yet with a mic |
+| Test sounds through the headphone jack | Built, experimental |
+| Audio through the headphone jack, and a Windows output device for it | **Not working**: see [Known limits](#known-limits) |
 | Non-Steam games | **Not working**: see [Known limits](#known-limits) |
 | NFC, magnetometer, waking the PC with the controller | **Not supported** |
 
@@ -131,7 +134,7 @@ To publish a release, set `<Version>` in `Switch2Bridge.csproj`, add its patch n
 ## Known limits
 
 - **Non-Steam games get no input.** Per HIDMaestro's notes, only Steam (and SDL with libusb) can read this virtual controller. Add a game to Steam to use it.
-- **Headphone jack audio doesn't work.** The controller's Bluetooth audio format is undocumented, and another active project, [switch2-pro-controller-windows](https://github.com/jony25/switch2-pro-controller-windows), lists it as unsolved too. Working it out needs a capture of a real Switch 2 sending audio to the controller. **Run audio test** in Settings shows what your controller sends.
+- **Headphone jack audio doesn't work.** The controller's Bluetooth audio format is undocumented, and another active project, [switch2-pro-controller-windows](https://github.com/jony25/switch2-pro-controller-windows), lists it as unsolved too. Working it out needs a capture of a real Switch 2 sending audio to the controller. **Run audio test** in Settings shows what your controller sends; the controller's input pauses during it, because on firmware 2.1.4 the audio channel replaces the normal input stream while it's on. The silence frames on that channel look like Opus (`F8 FF FE`). An Opus tone sent as report ID, state, length, then frame was audible from the controller's body, but not the headphones. **Play test sounds** is working on that. An untested setting could be loud, so don't wear headphones for it.
 - **Input delay.** A Switch 2 talks to its controllers every 5 ms. Windows' limit is 7.5 ms, and one test PC settled on 15 ms (about 68 reports a second).
 - **The exe isn't code-signed**, so SmartScreen warns about it. That needs a paid certificate.
 - **Steam's label and battery.** Steam may call the device "Nintendo Switch Pro Controller". The bridge passes the real battery voltage to Steam, but SDL's Switch 2 driver doesn't read battery, so Steam may show none.
@@ -143,6 +146,26 @@ To publish a release, set `<Version>` in `Switch2Bridge.csproj`, add its patch n
 ## Patch notes
 
 No version has been published as a GitHub Release yet. Dates are when each was built.
+
+### 0.9.2 (2026-11-02)
+
+- Bit 0 of the audio packet's state byte turns audio on: every odd value up to 0x0F played and every even one didn't. Test sounds now tries the higher bits with audio on, and a tone at rising levels in case the headphones were only too quiet.
+- The audio test and test sounds can no longer run at the same time.
+
+### 0.9.1 (2026-11-02)
+
+- First sound from the controller. On firmware 2.1.4, an Opus tone sent to the headset audio channel as report ID, state, length, then frame was audible from the controller's body, in repeated runs, with normal input running. It hasn't reached the headphones yet.
+- **Play test sounds** now plays a melody, to tell real audio from a buzz, then tries 20 state values to look for headphone routing, with separate buttons for where you hear each one.
+
+### 0.9.0 (2026-11-02)
+
+- Experimental **Play test sounds** in Settings: plays a quiet Opus tone through the headphone jack in 18 likely formats, with an "I heard it" button and saved results. Audio through the jack still isn't working; this is how we find out whether it can.
+
+### 0.8.1 (2026-11-02)
+
+- Audio test fixed: the controller sends one stream at a time, so normal input stops while the audio channel is on. The test now pauses Steam's input and carries on, confirms input comes back afterwards, and reports its rate from the time really taken.
+- The audio test recognises headphones with no mic.
+- The brief listen for battery level now happens at most every 15 minutes, because it causes a short gap in input.
 
 ### 0.8.0 (2026-11-02)
 

@@ -281,7 +281,7 @@ public partial class StatusWindow : Window
             ProbeStatus.Text = "The bridge is still starting.";
             return;
         }
-        ProbeButton.IsEnabled = false;
+        ProbeButton.IsEnabled = SoundsButton.IsEnabled = false;
         try
         {
             var progress = new Progress<string>(text => ProbeStatus.Text = text);
@@ -295,8 +295,65 @@ public partial class StatusWindow : Window
         }
         finally
         {
-            ProbeButton.IsEnabled = true;
+            ProbeButton.IsEnabled = SoundsButton.IsEnabled = true;
         }
+    }
+
+    AudioLab? _lab;
+    CancellationTokenSource? _soundsStop;
+
+    async void OnPlaySounds(object sender, RoutedEventArgs e)
+    {
+        if (_app.Bridge is not { } bridge)
+        {
+            SoundsStatus.Text = "The bridge is still starting.";
+            return;
+        }
+        var answer = MessageBox.Show(
+            "This sends sound to the controller's undocumented audio channel: a short melody, a tone at rising levels, then each setting that might route it to the headphones.\n\n" +
+            "Don't wear your headphones. An untested setting could make a loud noise. Plug them into the controller and hold them near your ear, not on it, with the controller's volume low.\n\n" +
+            "Listen closely to both, and click where you hear each sound straight away. Steam gets no input from this controller for under 2 minutes.\n\n" +
+            "No one has documented this channel, so there's a small unknown risk to the controller. Carry on?",
+            "Play test sounds", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
+        if (answer != MessageBoxResult.Yes) return;
+
+        SoundsButton.IsEnabled = ProbeButton.IsEnabled = false;
+        StopSoundsButton.IsEnabled = true;
+        _soundsStop = new CancellationTokenSource();
+        try
+        {
+            var progress = new Progress<string>(text => SoundsStatus.Text = text);
+            var verdict = await bridge.RunAudioLabAsync(lab =>
+            {
+                _lab = lab;
+                Dispatcher.BeginInvoke(() => HeardControllerButton.IsEnabled = HeardHeadphonesButton.IsEnabled = true);
+            }, progress, _soundsStop.Token);
+            SoundsStatus.Text = verdict ?? "Connect a Pro Controller first. Joy-Cons don't have a headphone jack.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.Warn($"Audio test sounds failed: {ex.Message}");
+            SoundsStatus.Text = $"The test didn't finish: {ex.Message}";
+        }
+        finally
+        {
+            _lab = null;
+            _soundsStop.Dispose();
+            _soundsStop = null;
+            SoundsButton.IsEnabled = ProbeButton.IsEnabled = true;
+            HeardControllerButton.IsEnabled = HeardHeadphonesButton.IsEnabled = false;
+            StopSoundsButton.IsEnabled = false;
+        }
+    }
+
+    void OnHeardController(object sender, RoutedEventArgs e) => _lab?.MarkHeard(AudioLab.Heard.Controller);
+
+    void OnHeardHeadphones(object sender, RoutedEventArgs e) => _lab?.MarkHeard(AudioLab.Heard.Headphones);
+
+    void OnStopSounds(object sender, RoutedEventArgs e)
+    {
+        StopSoundsButton.IsEnabled = false;
+        _soundsStop?.Cancel();
     }
 
     void OnOpenProbeResults(object sender, RoutedEventArgs e)

@@ -201,12 +201,21 @@
 
                         <TextBlock Text="Headset audio experiment" FontWeight="SemiBold" />
                         <TextBlock Margin="0,4,0,0" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                   Text="Headphone jack audio doesn't work yet. This 22-second test only listens, to see what a Pro Controller sends with a mic headset plugged in." />
+                                   Text="Headphone jack audio doesn't work yet. This 22-second test only listens, to see what a Pro Controller sends with a mic headset plugged in. The controller's input pauses during the test." />
                         <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                             <Button x:Name="ProbeButton" Content="Run audio test" Margin="0,0,8,0" Click="OnRunProbe" />
                             <Button Content="Open results" Click="OnOpenProbeResults" />
                         </StackPanel>
                         <TextBlock x:Name="ProbeStatus" Margin="0,8,0,0" TextWrapping="Wrap" />
+                        <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   Text="Test sounds plays a melody, then tries the settings that might send sound to the headphone jack. Keep headphones plugged in but off your ears, because an untested setting could be loud. It takes under 2 minutes, and Steam gets no input from this controller meanwhile." />
+                        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                            <Button x:Name="SoundsButton" Content="Play test sounds" Margin="0,0,8,0" Click="OnPlaySounds" />
+                            <Button x:Name="HeardControllerButton" Content="From the controller" Margin="0,0,8,0" IsEnabled="False" Click="OnHeardController" />
+                            <Button x:Name="HeardHeadphonesButton" Content="From the headphones" Margin="0,0,8,0" IsEnabled="False" Click="OnHeardHeadphones" />
+                            <Button x:Name="StopSoundsButton" Content="Stop" IsEnabled="False" Click="OnStopSounds" />
+                        </StackPanel>
+                        <TextBlock x:Name="SoundsStatus" Margin="0,8,0,0" TextWrapping="Wrap" />
                     </StackPanel>
                 </Expander>
             </StackPanel>

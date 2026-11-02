@@ -31,6 +31,9 @@ sealed class LinkStats
 
     public LinkStats(string name) => _name = name;
 
+    /// <summary>Starts timing afresh, so a deliberate pause doesn't count as a stall.</summary>
+    public void Restart() => _last = 0;
+
     /// <summary>Call on every report, with Stopwatch.GetTimestamp().</summary>
     public void Report(long now)
     {

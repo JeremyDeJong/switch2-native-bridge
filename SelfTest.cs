@@ -290,6 +290,46 @@ static class SelfTest
         Check(PowerInfo.Parse(new byte[64]) == null && PowerInfo.Parse([7]) == null, "empty or too-short reports give no level");
         Check(PowerInfo.Parse([7, 10 << 2]) == null, "a level above 9 is rejected");
 
+        // Test sounds: our encoder produces the same kind of frame the controller's silence
+        // frames are, the audible packet layout is built exactly, and the tones survive encoding.
+        foreach (var (stereo, firstByte) in new[] { (false, (byte)0xF8), (true, (byte)0xFC) })
+        {
+            var encoder = AudioLab.NewEncoder(stereo);
+            double phase = 0;
+            var frames = Enumerable.Range(0, 20).Select(_ => AudioLab.EncodeToneFrame(encoder, stereo, 660, ref phase)).ToList();
+            Check(frames.All(f => f.Length is > 0 and <= AudioLab.AudioBlock && f[0] == firstByte),
+                $"test sounds: {(stereo ? "stereo" : "mono")} Opus frames should start with 0x{firstByte:X2} and fit the block: first bytes {string.Join(",", frames.Select(f => f[0].ToString("X2")).Distinct())}, longest {frames.Max(f => f.Length)}");
+            var opusDecoder = Concentus.OpusCodecFactory.CreateDecoder(48000, stereo ? 2 : 1);
+            var pcm = new short[960 * (stereo ? 2 : 1)];
+            int peak = 0;
+            foreach (var f in frames.Skip(10))
+            {
+                opusDecoder.Decode(f, pcm, 960, false);
+                peak = Math.Max(peak, pcm.Max(s => Math.Abs((int)s)));
+            }
+            Check(peak is > 200 and < 3000, $"test sounds: {(stereo ? "stereo" : "mono")} tone decodes and stays quiet (peak {peak})");
+        }
+        var levelSteps = AudioLab.Steps.Skip(1).Take(3).ToList();
+        var bitSteps = AudioLab.Steps.Skip(4).ToList();
+        Check(AudioLab.Steps[0].Melody && levelSteps.All(st => st.State == 0x0D) && levelSteps.Select(st => st.Level).Distinct().Count() == 3, "test sounds: a melody, then one tone at 3 levels");
+        Check(bitSteps.Count == 30 && bitSteps.All(st => (st.State & 1) == 1 && st.State >= 0x10) && bitSteps.Select(st => st.State).Distinct().Count() == 30, "test sounds: 30 high-bit states, each with audio switched on");
+        Check(AudioLab.TotalTime < TimeSpan.FromMinutes(2), $"test sounds: finishes in under 2 minutes ({AudioLab.TotalTime.TotalSeconds:0} s)");
+        var loudEncoder = AudioLab.NewEncoder(false);
+        var loudDecoder = Concentus.OpusCodecFactory.CreateDecoder(48000, 1);
+        var loudPcm = new short[960];
+        double loudPhase = 0;
+        int loudPeak = 0;
+        for (int i = 0; i < 20; i++)
+        {
+            loudDecoder.Decode(AudioLab.EncodeToneFrame(loudEncoder, false, 660, ref loudPhase, AudioLab.LoudestLevel), loudPcm, 960, false);
+            if (i >= 10) loudPeak = Math.Max(loudPeak, loudPcm.Max(s => Math.Abs((int)s)));
+        }
+        Check(loudPeak is > 1000 and < 13000, $"test sounds: the loudest tone stays well below full scale (peak {loudPeak})");
+        Check(AudioLab.MelodyNote(TimeSpan.Zero) < AudioLab.MelodyNote(TimeSpan.FromSeconds(2.5)) && AudioLab.MelodyNote(TimeSpan.FromSeconds(2.5)) < AudioLab.MelodyNote(TimeSpan.FromSeconds(99)), "test sounds: the melody rises and holds its last note");
+        byte[] opusFrame = [0xF8, 0xAA];
+        Check(AudioLab.BuildPacket(0x0D, opusFrame) is [0, 0x0D, 0x32, 0xF8, 0xAA, 0, ..] and { Length: 53 }, "test sounds: the audible layout is report ID, state, length, frame");
+        Check(AudioLab.BuildPacket(0x40, opusFrame) is [0, 0x40, ..], "test sounds: the state byte goes where intended");
+
         // Audio probe: the documented firmware reply and report layout, and honest verdicts.
         var fw = FirmwareInfo.Parse(Convert.FromHexString("01000E010C000000FFFFFFFF"));
         Check(fw is { Type: 1, Dsp: null, ListedWithHeadsetAudio: false } && fw.Firmware == new Version(1, 0, 14) && fw.Bluetooth == new Version(12, 0, 0),
@@ -316,6 +356,10 @@ static class SelfTest
         var moving = Stats(AudioFrame(0, 7, 1), AudioFrame(1, 7, 2));
         Check(AudioProbe.Verdict(Stats(), Stats()).StartsWith("No reports"), "probe verdict: nothing arrived");
         Check(AudioProbe.Verdict(Stats(AudioFrame(0, 0, 0)), Stats(AudioFrame(1, 0, 0))).Contains("no headset"), "probe verdict: no headset");
+        Check(AudioProbe.Verdict(Stats(AudioFrame(0, 0x05, 0)), Stats(AudioFrame(1, 0x0D, 1))).Contains("no mic"), "probe verdict: headphones with no mic");
+        var quickPhase = AudioProbe.Describe("Quiet", Stats(AudioFrame(0, 7, 1), AudioFrame(1, 7, 1)), TimeSpan.FromSeconds(0.5), 0);
+        Check(quickPhase.Contains("0.5 s") && quickPhase.Contains("(4.0/s)"), "audio rate uses the time a phase really took");
+        Check(AudioProbe.Describe("Talking", Stats(), TimeSpan.Zero, 0).Contains("0 audio reports (0.0/s)"), "a phase that never ran doesn't divide by zero");
         Check(AudioProbe.Verdict(silent, silent).Contains("every audio byte is zero"), "probe verdict: mic silent");
         Check(AudioProbe.Verdict(constant, moving).StartsWith("Promising"), "probe verdict: reacts to sound");
         Check(AudioProbe.Verdict(moving, moving).Contains("can't tell"), "probe verdict: no difference claims nothing");

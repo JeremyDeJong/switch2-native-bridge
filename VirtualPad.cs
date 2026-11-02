@@ -200,11 +200,48 @@ sealed class VirtualPad : IDisposable
     }
 
     readonly Dictionary<ControllerKind, long> _lastReport = [];
+    volatile bool _audioTest;
+
+    /// <summary>Runs the audio test on this pad's Pro Controller. Normal input stops while the
+    /// test's channel is on, so Steam sees a released controller, and the pause doesn't count
+    /// as a dead link or a stall.</summary>
+    public Task<string?> RunAudioTestAsync(IProgress<string> progress, CancellationToken ct) =>
+        RunWithInputPausedAsync(controller => AudioProbe.RunAsync(controller, progress, ct));
+
+    /// <summary>Runs the test sounds the same way; <paramref name="ready"/> gets the running test.</summary>
+    public Task<string?> RunAudioLabAsync(Action<AudioLab> ready, IProgress<string> progress, CancellationToken ct) =>
+        RunWithInputPausedAsync(controller =>
+        {
+            var lab = new AudioLab(controller);
+            ready(lab);
+            return lab.RunAsync(progress, ct);
+        });
+
+    async Task<string?> RunWithInputPausedAsync(Func<SwitchController, Task<string>> test)
+    {
+        if (LivePro is not { } controller) return null;
+        using var hold = HoldIsolation();
+        _audioTest = true;
+        Submit();
+        InputCapture.Note(Number, ControllerKind.ProController, "audio test started, input paused");
+        try { return await test(controller); }
+        finally
+        {
+            lock (_gate)
+            {
+                _lastReport[ControllerKind.ProController] = Environment.TickCount64;
+                if (_link.TryGetValue(ControllerKind.ProController, out var link)) link.Restart();
+            }
+            InputCapture.Note(Number, ControllerKind.ProController, "audio test finished");
+            _audioTest = false;
+        }
+    }
 
     /// <summary>Ends sessions that have stopped sending reports, so the controller can
     /// reconnect. After sleep, for example, Windows can still call a dead link connected.</summary>
     public void EndStaleSessions(TimeSpan after)
     {
+        if (_audioTest) return;
         long now = Environment.TickCount64;
         var stale = new List<SwitchController>();
         lock (_gate)

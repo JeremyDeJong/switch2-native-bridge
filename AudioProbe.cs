@@ -26,6 +26,8 @@ sealed record FirmwareInfo(Version Firmware, int Type, Version Bluetooth, Versio
 /// a short quiet phase and a talking phase, and records what arrives. It writes nothing to
 /// the audio output channel. The format of these bytes is undocumented, so this only shows
 /// whether data arrives, how fast, and whether it reacts to sound. It can't decode it.
+/// The controller sends one stream at a time: while this channel is on, normal input stops,
+/// so the caller pauses Steam's input for the length of the test.
 /// </summary>
 static class AudioProbe
 {
@@ -35,9 +37,13 @@ static class AudioProbe
     const int CounterAt = 0x0, PowerAt = 0x1, StateAt = 0xD, LengthAt = 0xE, DataAt = 0xF;
     internal const int DocumentedLength = 0x32;
 
+    /// <summary>The standard Opus silence frame, seen on the channel with a quiet or absent mic.</summary>
+    internal static readonly byte[] OpusSilence = [0xF8, 0xFF, 0xFE];
+
     static readonly TimeSpan Settle = TimeSpan.FromSeconds(2);
     static readonly TimeSpan Phase = TimeSpan.FromSeconds(10);
-    const long InputStallMs = 3000;
+    const long DataStallMs = 3000;
+    const int InputResumeChecks = 12; // up to 3 seconds
 
     internal readonly record struct Frame(byte Counter, byte Power, byte State, byte[] Data)
     {
@@ -95,6 +101,8 @@ static class AudioProbe
             return "Reports arrived but were too short to hold the documented layout. The raw capture may show why.";
         if (quiet.States.All(s => s == 0) && talking.States.All(s => s == 0))
             return "The controller reports no headset attached (state 0). Plug in a headset with a mic and run it again.";
+        if (quiet.States.Concat(talking.States).All(s => s is 0 or 0x05 or 0x0D))
+            return "The controller sees headphones with no mic (states 0x05 and 0x0D), so there's no voice to capture. Use a headset with a mic to compare quiet and talking.";
         if (quiet.NonZeroPercent == 0 && talking.NonZeroPercent == 0)
             return "A headset is detected, but every audio byte is zero. The microphone may need turning on by a command we don't know yet.";
         if (Math.Abs(talking.ChangedPercent - quiet.ChangedPercent) >= 10 || Math.Abs(talking.NonZeroPercent - quiet.NonZeroPercent) >= 10)
@@ -102,11 +110,14 @@ static class AudioProbe
         return "Data is arriving, but it looks about the same quiet or talking. It could be constant-rate compressed audio, or something else; this test can't tell.";
     }
 
-    static string Describe(string name, PhaseStats s, TimeSpan duration, int inputReports) =>
-        $"{name}: {s.Reports} audio reports ({s.Reports / duration.TotalSeconds:0.0}/s), {s.LostCounters} skipped by the counter, " +
-        $"{s.Malformed} malformed, {s.Distinct} distinct, {s.NonZeroPercent:0.0}% non-zero bytes, " +
-        $"{s.ChangedPercent:0.0}% bytes changed per report, states [{string.Join(", ", s.States.Select(b => $"0x{b:X2}"))}], " +
-        $"{inputReports / duration.TotalSeconds:0.0} normal input reports/s";
+    internal static string Describe(string name, PhaseStats s, TimeSpan duration, int inputReports)
+    {
+        double seconds = Math.Max(duration.TotalSeconds, 0.001);
+        return $"{name}: {duration.TotalSeconds:0.0} s, {s.Reports} audio reports ({s.Reports / seconds:0.0}/s), {s.LostCounters} skipped by the counter, " +
+            $"{s.Malformed} malformed, {s.Distinct} distinct, {s.NonZeroPercent:0.0}% non-zero bytes, " +
+            $"{s.ChangedPercent:0.0}% bytes changed per report, states [{string.Join(", ", s.States.Select(b => $"0x{b:X2}"))}], " +
+            $"{inputReports} normal input reports";
+    }
 
     /// <summary>Runs the experiment on a connected Pro Controller and returns the verdict.
     /// Always unsubscribes, and stops early if normal input stalls.</summary>
@@ -131,62 +142,86 @@ static class AudioProbe
         var captured = new List<(long Ms, int Phase, byte[] Report)>();
         int phase = 0; // 0 = settling, 1 = quiet, 2 = talking
         var inputCounts = new int[3];
-        long lastInput = Environment.TickCount64;
+        var phaseMs = new long[3];
+        long afterStopInputs = 0;
+        bool stoppedListening = false;
+        long lastData = Environment.TickCount64;
         long start = Environment.TickCount64;
-        void OnAudio(byte[] data) { lock (gate) captured.Add((Environment.TickCount64 - start, phase, data)); }
-        void OnInput(byte[] _) { lock (gate) { inputCounts[phase]++; lastInput = Environment.TickCount64; } }
+        void OnAudio(byte[] data) { lock (gate) { captured.Add((Environment.TickCount64 - start, phase, data)); lastData = Environment.TickCount64; } }
+        void OnInput(byte[] _)
+        {
+            lock (gate)
+            {
+                if (stoppedListening) afterStopInputs++;
+                else { inputCounts[phase]++; lastData = Environment.TickCount64; }
+            }
+        }
 
         controller.InputReport += OnInput;
         string? stopped = null;
         try
         {
             await controller.StartHeadsetCaptureAsync(OnAudio, ct);
-            async Task<bool> Wait(TimeSpan duration)
+            async Task<bool> Wait(TimeSpan duration, int thisPhase)
             {
-                var end = Environment.TickCount64 + (long)duration.TotalMilliseconds;
-                while (Environment.TickCount64 < end)
+                var began = Environment.TickCount64;
+                var end = began + (long)duration.TotalMilliseconds;
+                bool alive = true;
+                while (alive && Environment.TickCount64 < end)
                 {
                     await Task.Delay(250, ct);
-                    long sinceInput;
-                    lock (gate) sinceInput = Environment.TickCount64 - lastInput;
-                    if (sinceInput > InputStallMs) return false;
+                    lock (gate) alive = Environment.TickCount64 - lastData <= DataStallMs;
                 }
-                return true;
+                phaseMs[thisPhase] = Environment.TickCount64 - began;
+                return alive;
             }
 
             progress.Report("Starting...");
-            bool ok = await Wait(Settle);
+            bool ok = await Wait(Settle, 0);
             if (ok)
             {
                 progress.Report($"Stay quiet for {Phase.TotalSeconds:0} seconds, and don't touch the mic.");
                 lock (gate) phase = 1;
-                ok = await Wait(Phase);
+                ok = await Wait(Phase, 1);
             }
             if (ok)
             {
                 progress.Report($"Now talk into the mic for {Phase.TotalSeconds:0} seconds.");
                 lock (gate) phase = 2;
-                ok = await Wait(Phase);
+                ok = await Wait(Phase, 2);
             }
-            if (!ok) stopped = "Stopped early: normal controller input stalled while listening, so listening to this channel may interfere with it.";
+            if (!ok) stopped = "Stopped early: the controller stopped sending anything while listening.";
         }
         finally
         {
+            lock (gate) stoppedListening = true;
             await controller.StopHeadsetCaptureAsync(OnAudio);
-            controller.InputReport -= OnInput;
         }
+
+        // The channel replaces normal input while it's on, so check input really comes back.
+        progress.Report("Checking normal input came back...");
+        bool resumed = false;
+        for (int i = 0; i < InputResumeChecks && !resumed; i++)
+        {
+            await Task.Delay(250, ct);
+            lock (gate) resumed = afterStopInputs > 0;
+        }
+        controller.InputReport -= OnInput;
+        Note(resumed ? "Normal input came back after the test." : "Normal input did NOT come back after the test.");
+        if (!resumed) controller.EndSession();
 
         List<(long Ms, int Phase, byte[] Report)> all;
         int[] inputs;
         lock (gate) { all = [.. captured]; inputs = [.. inputCounts]; }
         var quiet = Analyze(all.Where(c => c.Phase == 1).Select(c => c.Report).ToList());
         var talking = Analyze(all.Where(c => c.Phase == 2).Select(c => c.Report).ToList());
-        Note(Describe("Quiet", quiet, Phase, inputs[1]));
-        Note(Describe("Talking", talking, Phase, inputs[2]));
+        Note(Describe("Quiet", quiet, TimeSpan.FromMilliseconds(phaseMs[1]), inputs[1]));
+        Note(Describe("Talking", talking, TimeSpan.FromMilliseconds(phaseMs[2]), inputs[2]));
         if (all.Select(c => Parse(c.Report)).OfType<Frame>().Cast<Frame?>().LastOrDefault() is Frame last)
             Note($"Power byte: battery level {last.BatteryLevel} of 9, external power {last.ExternalPower}, charging {last.Charging}.");
 
         var verdict = stopped ?? Verdict(quiet, talking);
+        if (!resumed) verdict += " Normal input didn't come back, so the bridge is reconnecting the controller.";
         Note(verdict);
         Save(report, all);
         return verdict;
